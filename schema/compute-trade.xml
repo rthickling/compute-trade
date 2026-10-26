@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Demo protocol. SOFH is a separate, six-byte, big-endian transport header:
+     uint32 messageLength (including SOFH), uint16 encodingType = 0xEB50. -->
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="compute_trade.wire" id="1" version="0"
+                   semanticVersion="0.1.0" byteOrder="littleEndian">
+    <types>
+        <composite name="messageHeader" description="Standard SBE message header">
+            <type name="blockLength" primitiveType="uint16"/>
+            <type name="templateId" primitiveType="uint16"/>
+            <type name="schemaId" primitiveType="uint16"/>
+            <type name="version" primitiveType="uint16"/>
+        </composite>
+        <type name="OrderId" primitiveType="uint64"/>
+        <type name="InstrumentId" primitiveType="uint32"/>
+        <type name="Price" primitiveType="int64" description="Integer price ticks"/>
+        <type name="Quantity" primitiveType="uint64" description="Whole quantity units"/>
+        <enum name="Side" encodingType="uint8">
+            <validValue name="Buy">1</validValue>
+            <validValue name="Sell">2</validValue>
+        </enum>
+        <enum name="Status" encodingType="uint8">
+            <validValue name="Accepted">0</validValue>
+            <validValue name="Rejected">1</validValue>
+        </enum>
+        <enum name="RejectReason" encodingType="uint8">
+            <validValue name="None">0</validValue>
+            <validValue name="MalformedMessage">1</validValue>
+            <validValue name="InvalidOrder">2</validValue>
+            <validValue name="UnknownInstrument">3</validValue>
+            <validValue name="DuplicateClientOrderId">4</validValue>
+        </enum>
+    </types>
+    <sbe:message name="NewOrder" id="1" blockLength="29"
+                 description="Good-till-cancelled limit order; integer prices and quantities">
+        <field name="clientOrderId" id="1" type="OrderId" offset="0"/>
+        <field name="instrumentId" id="2" type="InstrumentId" offset="8"/>
+        <field name="side" id="3" type="Side" offset="12"/>
+        <field name="price" id="4" type="Price" offset="13"/>
+        <field name="quantity" id="5" type="Quantity" offset="21"/>
+    </sbe:message>
+    <sbe:message name="Acknowledgement" id="2" blockLength="38"
+                 description="One final response for each framed NewOrder request">
+        <field name="clientOrderId" id="1" type="OrderId" offset="0"/>
+        <field name="orderId" id="2" type="OrderId" offset="8"/>
+        <field name="instrumentId" id="3" type="InstrumentId" offset="16"/>
+        <field name="status" id="4" type="Status" offset="20"/>
+        <field name="reason" id="5" type="RejectReason" offset="21"/>
+        <field name="executedQuantity" id="6" type="Quantity" offset="22"/>
+        <field name="remainingQuantity" id="7" type="Quantity" offset="30"/>
+    </sbe:message>
+</sbe:messageSchema>
