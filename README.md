@@ -73,6 +73,31 @@ just check
 `just` defaults to `g++-16`; override with `CXX=/path/to/compiler`. Use a fresh
 build directory when switching compilers.
 
+## VS Code navigation
+
+Open the Compute Trade folder in VS Code with Microsoft's C/C++ extension.
+The workspace settings use `build/debug/compile_commands.json` for compiler
+flags and include paths, and index the sibling Simplx headers and sources.
+Run `just configure debug` to generate or refresh the compilation database.
+Then use F12 (Go to Definition) or Ctrl-click to follow symbols into Simplx;
+Shift-F12 finds references. If navigation is stale, run **C/C++: Reset IntelliSense
+Database** from the Command Palette and allow indexing to finish.
+
+If Simplx lives somewhere other than `../simplx`, configure CMake with
+`SIMPLX_SOURCE_DIR` as described above and update the two Simplx browsing paths
+in `.vscode/settings.json` to match.
+
+To debug, open **Run and Debug** (Ctrl-Shift-D), select **Debug exchange (CMake)**,
+and press F5. This configures the Debug preset, builds the `ct_exchange` target,
+and launches it with GDB. Use this launch configuration instead of **build and
+debug active file**: the exchange needs CMake's include paths, other source
+files, and the Simplx library.
+
+Set a breakpoint in `MatchingEngineActor::onEvent` in `src/exchange.cpp`. Once
+the exchange prints `READY`, run `just inject 1 1` in a separate terminal to send
+one order. The injector currently waits five seconds for a response, so it may
+disconnect while you are stepping through the exchange.
+
 ## Continuous integration
 
 [GitHub Actions](.github/workflows/build-and-test.yml) runs on pushes, pull
