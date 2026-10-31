@@ -160,6 +160,42 @@ gets a malformed-message acknowledgement with client ID `0` because the request
 could not be reliably decoded. Rejections follow the same actor path as accepted
 orders, preserving response order within a connection.
 
+### SOFH framing helpers
+
+TCP delivers a stream of bytes: a read can contain part of a message or several
+messages together. SOFH supplies the total frame length so the receiver can
+wait for a complete frame and separate it from the next one. The length includes
+all three parts: the six-byte SOFH, the eight-byte SBE header, and the SBE body.
+It differs from the SBE block length, which describes the fixed body block.
+
+[`sbe.hpp`](../include/compute_trade/sbe.hpp) is a handwritten adapter;
+only the files under `include/compute_trade/generated/` are generated codecs.
+The adapter implements these framing helpers:
+
+- `read_be32(span<const byte>)` reads the first four bytes as an unsigned
+  big-endian integer. Each step shifts the accumulated value left eight bits
+  and inserts the next byte with bitwise OR. It requires at least four bytes;
+  `frame_length()` checks for the full six-byte header before calling it.
+- `write_sofh(span<byte>)` takes a view of the **whole frame**, uses its size as
+  the length, and writes only the first six bytes. Shifts of 24, 16, 8, and 0
+  extract the length's bytes in big-endian order. It then writes `EB 50`, the
+  identifier for little-endian SBE. The span must contain at least six bytes
+  and its size must fit in `uint32_t`; our callers use fixed-size frame arrays.
+
+For example, a NewOrder frame begins with `00 00 00 2B EB 50`: `0x2B` is 43,
+the sum of 6 framing bytes, 8 SBE header bytes, and 29 body bytes. SOFH is big
+endian even though this schema's SBE header and body are little endian. Explicit
+byte operations work independently of host byte order and buffer alignment.
+The spans borrow existing storage; neither helper allocates or copies a frame.
+
+Published references:
+
+- [FIX Trading Community: SOFH](https://fixtrading.org/sofh/).
+- [SOFH field definitions and byte order](https://github.com/FIXTradingCommunity/fix-simple-open-framing-header/blob/master/v1-1-RC1/sofh.md)
+  (version 1.1 release candidate 1).
+- [FIX SBE wire examples](https://github.com/FIXTradingCommunity/fix-simple-binary-encoding/blob/master/v1-0-RC4/doc/07Examples.md),
+  showing the `EB50` identifier and the distinction between SOFH and SBE byte order.
+
 ## Buffering, disconnects, and failure limits
 
 The OEG permits at most 16 active sessions. Each session has a fixed 2,048-byte
