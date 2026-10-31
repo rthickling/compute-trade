@@ -25,5 +25,5 @@ exchange core="" mode="release": (build mode)
     fi
     exec "./build/$2/bin/ct_exchange"
 
-inject count="1000" window="1" mode="release": (build mode)
-    "./build/{{ mode }}/bin/ct_injector" --count "{{ count }}" --window "{{ window }}"
+inject count="1000" window="1" price="10000" mode="release": (build mode)
+    "./build/{{ mode }}/bin/ct_injector" --count "{{ count }}" --window "{{ window }}" --price "{{ price }}"
