@@ -61,6 +61,12 @@ jobs:
           apt-get update
           apt-get install --yes --no-install-recommends cmake ninja-build python3
 
+      - name: Verify generated SBE codecs
+        if: matrix.toolchain.cxx == 'g++' && matrix.preset == 'debug'
+        run: |
+          apt-get install --yes --no-install-recommends openjdk-21-jre-headless ca-certificates
+          python3 tools/generate_sbe.py --check
+
       - name: Show toolchain
         run: |
           "$CXX" --version

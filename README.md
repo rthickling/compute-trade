@@ -151,6 +151,27 @@ numbers establish a functioning path; they are not measurements of cache hit
 latency or isolated matching-engine service time. The default alternating
 workload deliberately keeps the live book small.
 
+## SBE codecs
+
+Message headers and bodies use C++ codecs generated from
+[`schema/compute-trade.xml`](schema/compute-trade.xml) by the
+[SBE reference implementation](https://github.com/aeron-io/simple-binary-encoding),
+pinned to version 1.41.0. Generated headers are checked in, so normal builds need
+neither Java nor a generator download. The adapter retains SOFH transport framing
+and strict validation of the demo protocol.
+
+After changing the schema, regenerate with Python 3 and Java 17 or newer:
+
+```sh
+python3 tools/generate_sbe.py
+python3 tools/generate_sbe.py --check
+```
+
+The script downloads the pinned generator from Maven Central and verifies its
+SHA-256. For offline regeneration, supply `--jar /path/to/sbe-all-1.41.0.jar`.
+Set `JAVA=/path/to/java` to select a runtime. CI checks that generated headers
+match the schema. See [upstream attribution](third_party/sbe/README.md).
+
 ## Tests and implementation
 
 CTest runs SBE codec tests, matching tests, and a Python integration suite that
