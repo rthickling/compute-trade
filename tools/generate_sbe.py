@@ -4,11 +4,11 @@
 import argparse
 import hashlib
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import urllib.request
+from pathlib import Path
 
 VERSION = "1.41.0"
 SHA256 = "729b4271beb577f380380a1793e60f156ff75859b08ea603c4e2ae6b5e9a04ca"

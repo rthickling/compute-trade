@@ -12,7 +12,6 @@ import sys
 import tempfile
 import time
 
-
 SOFH = struct.Struct("!IH")
 SBE_HEADER = struct.Struct("<HHHH")
 ORDER = struct.Struct("<QIBqQ")
@@ -407,7 +406,7 @@ def injector_smoke(exchange_executable, injector_executable):
                 "--window",
                 "64",
             ],
-            capture_output=True,
+            check=False, capture_output=True,
             text=True,
             timeout=15,
         )
@@ -427,7 +426,7 @@ def injector_smoke(exchange_executable, injector_executable):
 def command_line_validation(exchange_executable, injector_executable):
     for executable in (exchange_executable, injector_executable):
         result = subprocess.run(
-            [executable, "--help"], capture_output=True, text=True, timeout=TIMEOUT
+            [executable, "--help"], check=False, capture_output=True, text=True, timeout=TIMEOUT
         )
         check(
             result.returncode == 0 and "Usage:" in result.stdout,
@@ -458,7 +457,7 @@ def command_line_validation(exchange_executable, injector_executable):
         for arguments in cases:
             result = subprocess.run(
                 [executable, *arguments],
-                capture_output=True,
+                check=False, capture_output=True,
                 text=True,
                 timeout=TIMEOUT,
             )
@@ -478,7 +477,7 @@ def startup_failures(exchange_executable):
         for case in arguments:
             result = subprocess.run(
                 [exchange_executable, *case],
-                capture_output=True,
+                check=False, capture_output=True,
                 text=True,
                 timeout=TIMEOUT,
             )
