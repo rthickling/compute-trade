@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Demo protocol. SOFH is a separate, six-byte, big-endian transport header:
+<!-- Compute Trade protocol. SOFH is a separate, six-byte, big-endian transport header:
      uint32 messageLength (including SOFH), uint16 encodingType = 0xEB50. -->
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
                    package="compute_trade.wire" id="1" version="0"

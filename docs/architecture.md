@@ -217,7 +217,7 @@ sets can grow with accepted traffic and connection lifetime. There is no book
 capacity limit or deduplication-retention policy yet.
 
 Allocation failures, actor exceptions, and unexpected listener failures mark the
-whole demo as failed and stop it. Matching is not transactional under allocation
+exchange as failed and stop it. Matching is not transactional under allocation
 or trade-callback failure: fills already applied are not rolled back. Recovery,
 durability, replication, and exchange-grade admission controls remain future
 work.

@@ -15,7 +15,7 @@ namespace compute_trade::sbe {
 // Handwritten transport and domain adapter around upstream-generated SBE codecs.
 // Only the headers under generated/ are generated from the XML schema.
 // SOFH uses network byte order; the SBE message header and body use little endian.
-// This is a demo schema, not the Euronext Optiq wire protocol. Decoding is strict
+// Compute Trade defines its own wire schema. Decoding is strict
 // to version 0: future schema extensions must be implemented explicitly.
 inline constexpr std::size_t bits_per_octet = 8;
 inline constexpr std::uint32_t octet_mask = 0xFF;

@@ -1,8 +1,7 @@
 # Compute Trade
 
-A demonstration exchange for computation resources, built with
-[Simplx](https://github.com/rthickling/simplx). The project supports learning and a
-live C++ London presentation about exchange implementation and CPU caches.
+Compute Trade is an open-source exchange for computation resources, built with
+[Simplx](https://github.com/rthickling/simplx).
 
 The first milestone provides a TCP order-entry gateway (OEG) and matching engine,
 each implemented as a Simplx actor on the **same pinned event loop**. A separate
@@ -28,7 +27,7 @@ Supported behaviour:
 - Business rejections, connection-scoped duplicate client-ID detection, TCP
   fragmentation/coalescing, and bounded transport buffering.
 
-The wire schema is a small demonstration protocol. It is not the Optiq protocol.
+Compute Trade defines its own wire schema.
 This milestone has no cancel/amend, maker fill notifications, market-data feed,
 authentication, persistence, or recovery. CPU isolation, Redzone scheduling, and
 cache-performance experiments come later.
@@ -108,7 +107,7 @@ the codec, order-book, and real TCP integration tests. No privileged scheduling
 or dedicated CPU isolation is required. The four jobs report independently,
 and newer commits cancel older runs on the same branch or pull request.
 
-## Run the demonstration
+## Run the exchange and injector
 
 Start the exchange in one terminal:
 
@@ -158,7 +157,7 @@ Message headers and bodies use C++ codecs generated from
 [SBE reference implementation](https://github.com/aeron-io/simple-binary-encoding),
 pinned to version 1.41.0. Generated headers are checked in, so normal builds need
 neither Java nor a generator download. The adapter retains SOFH transport framing
-and strict validation of the demo protocol.
+and strict validation of the wire protocol.
 
 After changing the schema, regenerate with Python 3 and Java 17 or newer:
 
