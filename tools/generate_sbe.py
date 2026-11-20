@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Regenerate checked-in C++ codecs with the pinned upstream SBE tool."""
+
 import argparse
 import hashlib
 import os
@@ -17,8 +18,12 @@ OUTPUT = ROOT / "include/compute_trade/generated"
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check", action="store_true", help="fail if checked-in codecs differ")
-    parser.add_argument("--jar", type=Path, help="use a local copy of the pinned sbe-all jar")
+    parser.add_argument(
+        "--check", action="store_true", help="fail if checked-in codecs differ"
+    )
+    parser.add_argument(
+        "--jar", type=Path, help="use a local copy of the pinned sbe-all jar"
+    )
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="compute-trade-sbe-") as tmp:
         tmp = Path(tmp)
@@ -31,21 +36,33 @@ def main():
         if hashlib.sha256(jar.read_bytes()).hexdigest() != SHA256:
             raise SystemExit("SBE generator SHA-256 mismatch")
         generated = tmp / "generated"
-        subprocess.run([
-            os.environ.get("JAVA", "java"),
-            "--add-opens", "java.base/jdk.internal.misc=ALL-UNNAMED",
-            "-Dsbe.target.language=Cpp",
-            f"-Dsbe.output.dir={generated}",
-            "-Dsbe.validation.stop.on.error=true",
-            "-jar", str(jar.resolve()), str(ROOT / "schema/compute-trade.xml"),
-        ], check=True)
-        files = {p.relative_to(generated): p.read_bytes() for p in generated.rglob("*.h")}
+        subprocess.run(
+            [
+                os.environ.get("JAVA", "java"),
+                "--add-opens",
+                "java.base/jdk.internal.misc=ALL-UNNAMED",
+                "-Dsbe.target.language=Cpp",
+                f"-Dsbe.output.dir={generated}",
+                "-Dsbe.validation.stop.on.error=true",
+                "-jar",
+                str(jar.resolve()),
+                str(ROOT / "schema/compute-trade.xml"),
+            ],
+            check=True,
+        )
+        files = {
+            p.relative_to(generated): p.read_bytes() for p in generated.rglob("*.h")
+        }
         if not files:
             raise SystemExit("SBE generator produced no headers")
         if args.check:
-            existing = {p.relative_to(OUTPUT): p.read_bytes() for p in OUTPUT.rglob("*.h")}
+            existing = {
+                p.relative_to(OUTPUT): p.read_bytes() for p in OUTPUT.rglob("*.h")
+            }
             if files != existing:
-                raise SystemExit("SBE headers are stale; run python3 tools/generate_sbe.py")
+                raise SystemExit(
+                    "SBE headers are stale; run python3 tools/generate_sbe.py"
+                )
             print("SBE headers match the schema and pinned generator")
         else:
             OUTPUT.mkdir(parents=True, exist_ok=True)
