@@ -68,3 +68,5 @@ Testing/
 .cache/
 __pycache__/
 *.pyc
+
+.history/

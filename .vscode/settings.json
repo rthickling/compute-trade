@@ -8,5 +8,9 @@
     "${workspaceFolder}/tests",
     "${workspaceFolder}/../simplx/include",
     "${workspaceFolder}/../simplx/src"
+  ],
+  "clangd.arguments": [
+    "--compile-commands-dir=${workspaceFolder}/build/debug",
+    "--query-driver=/usr/bin/g++-16,/usr/bin/g++"
   ]
 }
