@@ -27,3 +27,14 @@ exchange core="" mode="release": (build mode)
 
 inject count="1000" window="1" price="10000" mode="release": (build mode)
     "./build/{{ mode }}/bin/ct_injector" --count "{{ count }}" --window "{{ window }}" --price "{{ price }}"
+
+# Values for recipe argument `mode` (bash completion via `_completion_mode`).
+[private]
+_completion_mode:
+    #!/usr/bin/env python3
+    import json
+    from pathlib import Path
+    presets = json.loads(Path("CMakePresets.json").read_text())
+    for preset in presets["configurePresets"]:
+        if not preset.get("hidden"):
+            print(preset["name"])
