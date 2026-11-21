@@ -87,10 +87,26 @@ Stop the exchange with Ctrl-C and then stop the subscriber. A stream gap or
 subscriber loss requires a fresh run with an empty book.
 
 See [Exchange architecture and limits](docs/architecture.md) for request
-correlation, limits, recovery and overload handling. Use the [RedZone guide](docs/redzone.md)
-for setup, qualification and rollback. The [workload guide](docs/workloads.md)
+correlation, limits, recovery and overload handling. The [workload guide](docs/workloads.md)
 and [matcher benchmark](docs/matcher-benchmark.md) describe reproducible
 measurements.
+
+### RedZone
+
+Isolated real-time runs use two reserved physical cores; all other cores stay
+general-purpose. CPU selection, a GRUB menu entry, launch, placement checks and
+rollback are wrapped as `just` recipes in [`redzone.just`](redzone.just). See
+the [RedZone guide](docs/redzone.md) for the full procedure.
+
+```sh
+just redzone-layout          # portable defaults for this host
+just redzone-grub            # optional GRUB entry (default boot unchanged)
+just redzone-preflight       # after a RedZone boot
+just redzone-exchange        # RT launch
+just redzone-subscribe
+just redzone-placement
+just redzone-stop            # or: just redzone-reboot
+```
 
 The original TCP protocol remains available when the exchange is started
 without `--config`. Start the injector without `--logical-access` for that

@@ -1,5 +1,7 @@
-export CXX := env_var_or_default("CXX", "g++-16")
-export CMAKE_BUILD_PARALLEL_LEVEL := env_var_or_default("CMAKE_BUILD_PARALLEL_LEVEL", "2")
+export CXX := env("CXX", "g++-16")
+export CMAKE_BUILD_PARALLEL_LEVEL := env("CMAKE_BUILD_PARALLEL_LEVEL", "2")
+
+import 'redzone.just'
 
 default:
     @just --list

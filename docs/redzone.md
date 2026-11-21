@@ -1,52 +1,105 @@
 # RedZone operation on Linux
 
-The configured exchange can use three separate physical cores. The matcher
-completes frame assembly, decode, book changes and acknowledgement encoding
-on its own Simplx worker. The publisher owns the market-data socket on the
-second worker. The third worker copies disconnect notices and samples
-statistics. With `--redzone`, Simplx requests real-time FIFO scheduling
-for the matcher and publisher. Its BlueZone worker uses normal Linux
-scheduling. Ordinary scheduling is suitable for correctness tests.
+The configured exchange uses two RedZone physical cores and keeps every other
+core for general-purpose work. The matcher completes frame assembly, decode,
+book changes and acknowledgement encoding on one Simplx worker. The publisher
+owns the market-data socket on the second. BlueZone copies disconnect notices
+and samples statistics on a housekeeping CPU under ordinary Linux scheduling.
+With `--redzone`, Simplx requests real-time FIFO scheduling for the matcher
+and publisher. Ordinary scheduling is suitable for correctness tests.
+
+## Choose CPUs
+
+Inspect the host with `lscpu -e=CPU,CORE,SOCKET,ONLINE`. Use logical CPU
+numbers everywhere. The exchange checks that RedZone workers sit on different
+physical cores (including socket identity).
+
+`tools/redzone_layout.py` picks defaults for any machine:
+
+1. If the kernel already isolates exactly two CPUs, use those.
+2. Otherwise take the two highest non-boot physical cores' primary threads.
+3. BlueZone defaults to the highest remaining primary thread.
+4. Housekeeping is every online CPU except the two RedZone CPUs. The suggested
+   boot `irqaffinity` list is the primary threads that remain after `nosmt`.
+
+Override with arguments or `REDZONE_MATCHER`, `REDZONE_PUBLISHER`, and
+`REDZONE_BLUE`. Print the layout or the kernel command-line fragment:
+
+```sh
+python3 tools/redzone_layout.py
+python3 tools/redzone_layout.py --cmdline
+eval "$(python3 tools/redzone_layout.py --export)"
+```
+
+## just recipes
+
+RedZone recipes live in [`redzone.just`](../redzone.just) and are imported by
+the root justfile. From the repository root:
+
+| Recipe | Purpose |
+| --- | --- |
+| `just redzone-layout` | Show the selected CPUs and suggested cmdline |
+| `just redzone-grub` | Install a GRUB menu entry for that layout |
+| `just redzone-preflight` | Write layout + status under `build/redzone/` |
+| `just redzone-exchange` | Build release and launch with `--redzone` |
+| `just redzone-subscribe` | Pin the market subscriber to housekeeping |
+| `just redzone-placement` | Strict placement check against the control socket |
+| `just redzone-stop` | Stop exchange/subscriber; restore saved IRQ/workqueue files |
+| `just redzone-reboot` | `redzone-stop`, then reboot to the default GRUB entry |
+
+CPU overrides are positional, for example `just redzone-layout 14 12 10`, or
+set the `REDZONE_*` environment variables. `just redzone-exchange` also accepts
+`config`, `mode`, `port`, and `market_port`.
+
+Typical isolated run after a RedZone boot:
+
+```sh
+just redzone-preflight
+just redzone-exchange          # terminal A
+just redzone-subscribe         # terminal B
+just redzone-placement
+```
 
 ## Prepare an isolated boot
 
-Inspect the host with `lscpu -e=CPU,CORE,SOCKET,ONLINE`. Pick two usable
-non-boot CPUs on different physical cores and a third physical core for
-the BlueZone worker. Leave enough CPUs for the desktop, client and subscriber.
-Use logical CPU numbers for all flags. The physical core check in the exchange
-includes socket identity.
-
-In the bootloader, temporarily append these Linux kernel arguments, replacing
-`M` and `P` with the matcher and publisher logical CPU numbers and `HK` with
-the housekeeping CPU list. A one-boot edit in GRUB keeps the installed
-boot configuration intact.
+In the bootloader, boot once with these Linux kernel arguments. Replace `M`
+and `P` with the matcher and publisher logical CPUs and `HK` with the
+post-`nosmt` housekeeping primary list from `redzone_layout.py --cmdline`:
 
 ```text
 nosmt isolcpus=domain,managed_irq,M,P nohz_full=M,P rcu_nocbs=M,P irqaffinity=HK
 ```
 
-Run `lscpu -e=CPU,CORE,SOCKET,ONLINE` again after boot. Confirm that the chosen
-CPUs are online and their siblings have gone offline. Select housekeeping
-CPUs from the resulting online list. Use the status script first
-with the actual IDs supplied in your shell.
+To install a selectable GRUB entry without changing the default boot:
 
 ```sh
-python3 tools/redzone_status.py --matcher "$matcher_cpu" \
-  --publisher "$publisher_cpu" --blue "$blue_cpu" > preflight.json
+just redzone-grub
+```
+
+Hold Shift/Esc if needed, then choose **Ubuntu … (Compute Trade RedZone)**.
+The default menu entry remains ordinary Ubuntu.
+
+After boot, confirm siblings are offline and the reserved CPUs are online:
+
+```sh
+lscpu -e=CPU,CORE,SOCKET,ONLINE
+just redzone-preflight
 ```
 
 The status includes kernel boot settings, the workqueue CPU mask, effective
 IRQ targets and power settings. Where needed, move the global workqueue and
 movable IRQs to the housekeeping set. Linux uses a comma-separated list of
 indices and ranges for `smp_affinity_list`, and a hexadecimal bitmask for
-the workqueue `cpumask`. Keep the previous values if making runtime changes.
-For example, on a host whose housekeeping list is CPUs 0, 4 and 6, the list is
-`0,4,6` and the bitmask is `51`.
+the workqueue `cpumask`. Keep the previous values if making runtime changes
+(for example under `build/redzone/workqueue.before` and
+`build/redzone/irq-*.before` so `just redzone-stop` can restore them).
 
 ```sh
-cat /sys/devices/virtual/workqueue/cpumask > workqueue.before
+eval "$(python3 tools/redzone_layout.py --export)"
+mkdir -p build/redzone
+cat /sys/devices/virtual/workqueue/cpumask > build/redzone/workqueue.before
 printf '%s\n' "$housekeeping_mask" | sudo tee /sys/devices/virtual/workqueue/cpumask
-cat "/proc/irq/$irq/smp_affinity_list" > "irq-$irq.before"
+cat "/proc/irq/$irq/smp_affinity_list" > "build/redzone/irq-$irq.before"
 printf '%s\n' "$housekeeping" | sudo tee "/proc/irq/$irq/smp_affinity_list"
 ```
 
@@ -63,16 +116,13 @@ for the kernel controls.
 
 ## Launch and record
 
-Use a functional run first with normal privileges. For a real-time run, grant
-the launch user the applicable real-time priority limit or use a supervised
-transient systemd service. Keep the gateway local. Start the process from
-the repository root with the ports, session configuration and CPU IDs used
-in the run. Use a private directory for the optional control socket, and
-enable it when collecting placement diagnostics.
+Prefer the just recipes above. The equivalent manual launch is:
 
 ```sh
-control_dir=$(mktemp -d)
-control="$control_dir/placement.sock"
+eval "$(python3 tools/redzone_layout.py --export)"
+control="$PWD/build/redzone/control.sock"
+mkdir -p build/redzone
+rm -f "$control"
 sudo systemd-run --wait --pipe --collect --uid="$(id -u)" --gid="$(id -g)" \
   -p LimitRTPRIO=10 --working-directory="$PWD" \
   "$PWD/build/release/bin/ct_exchange" --config "$PWD/config/local.json" \
@@ -87,6 +137,8 @@ reconstruct from the beginning of one run. Start a new exchange and
 subscriber together after a gap or disconnect.
 
 ```sh
+just redzone-subscribe
+# or:
 taskset -c "$housekeeping" python3 tools/market_subscriber.py --port 9001 --quiet &
 subscriber_pid=$!
 ```
@@ -97,6 +149,8 @@ policy using their PIDs and the running exchange. Add `--residual-irq`
 once per recorded unavoidable IRQ if applicable.
 
 ```sh
+just redzone-placement
+# or:
 python3 tools/redzone_status.py --strict --matcher "$matcher_cpu" \
   --publisher "$publisher_cpu" --blue "$blue_cpu" --control "$control" \
   --subscriber-pid "$subscriber_pid" --client-pid "$client_pid" > placement.json
@@ -155,9 +209,13 @@ privileges.
 
 ## Rollback
 
-Stop the client, then stop the exchange service, subscriber and trace.
-Restore any changed `smp_affinity_list` and workqueue `cpumask` from their
-saved files using the same write commands. Restore the previous
-`irqbalance` and power settings. Reboot normally to discard the one-boot
-kernel flags and restore the boot-time CPU topology. Verify the restored
-state with `lscpu`, `/proc/cmdline` and the workqueue mask.
+Stop the client and any trace first. Then:
+
+```sh
+just redzone-stop      # stop exchange/subscriber; restore saved IRQ/workqueue files
+just redzone-reboot    # also reboot into the default (non-RedZone) GRUB entry
+```
+
+`nosmt` / `isolcpus` / `nohz_full` only clear after a normal reboot. The
+default GRUB entry is ordinary Ubuntu; the RedZone entry is opt-in.
+After reboot, verify with `lscpu`, `/proc/cmdline` and the workqueue mask.
