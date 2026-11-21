@@ -29,6 +29,13 @@ jobs:
           - name: Clang 22
             image: silkeh/clang:22-trixie
             cxx: clang++
+        include:
+          - preset: sanitizers
+            toolchain:
+              name: GCC 16.2 ASan and UBSan
+              image: gcc:16.2.0-trixie
+              cxx: g++
+            simplx_ref: 8b57604f68150ebf929ebecff0b895f263b8e2c3
 
     defaults:
       run:
@@ -51,7 +58,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: rthickling/simplx
-          ref: c0b2ca712f1c187b6c120d5bcaf441bdff1600ae
+          ref: ${{ matrix.simplx_ref || 'c0b2ca712f1c187b6c120d5bcaf441bdff1600ae' }}
           path: simplx
           persist-credentials: false
           submodules: false
@@ -59,7 +66,7 @@ jobs:
       - name: Install build and test tools
         run: |
           apt-get update
-          apt-get install --yes --no-install-recommends cmake ninja-build python3
+          apt-get install --yes --no-install-recommends cmake ninja-build python3 pkg-config libjson-c-dev
 
       - name: Verify generated SBE codecs
         if: matrix.toolchain.cxx == 'g++' && matrix.preset == 'debug'

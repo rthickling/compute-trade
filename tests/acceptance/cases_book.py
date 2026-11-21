@@ -6,7 +6,6 @@ from . import wire
 from .level3 import InvalidMarketData, Level3View, ordered_book, visible_order
 from .reference import BUY, SELL, Fill, ReferenceExchange
 
-
 FIRMS = {
     1: ("FIRM1", "FIRM2"),
     2: ("FIRM1",),

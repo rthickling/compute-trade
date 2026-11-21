@@ -1,6 +1,5 @@
 #include "compute_trade/sbe.hpp"
 
-#include <algorithm>
 #include <array>
 #include <iostream>
 #include <limits>

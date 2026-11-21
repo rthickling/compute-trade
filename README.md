@@ -1,192 +1,97 @@
 # Compute Trade
 
-Compute Trade is an open-source exchange for computation resources, built with
-[Simplx](https://github.com/rthickling/simplx).
+Compute Trade is a local demonstration exchange for physical GPUs. Instrument
+IDs identify separate GPU models. The exchange supports visible limit orders,
+cancellation, and cancel-replace over TCP using a subset of Optiq OEG SBE v354.
+It matches at the best eligible price and in FIFO order within that price.
+Trades execute at the resting order's price. The market data stream publishes
+order-level changes and a subscriber can reconstruct the Level 3 book.
 
-The first milestone provides a TCP order-entry gateway (OEG) and matching engine,
-each implemented as a Simplx actor on the **same pinned event loop**. A separate
-injector sends SBE-encoded limit orders and checks acknowledgements.
-
-```mermaid
-flowchart LR
-    Injector["ct_injector<br/>Separate process"] <-->|"TCP · SOFH + SBE"| OEG
-    subgraph CPU["One selected Linux logical CPU · one Simplx event loop"]
-        OEG["OEG actor<br/>Framing and decoding"] -->|"Request event"| ME["Matching-engine actor<br/>Price/time order books"]
-        ME -->|"Response event"| OEG
-    end
-```
-
-Supported behaviour:
-
-- Instruments `1` and `2`, with independent books.
-- Buy/sell limit orders using integer price ticks and whole quantity units.
-- Best-price priority, FIFO within a price level, and execution at the resting
-  order's price. Unfilled quantity rests in the book.
-- Exchange-generated order IDs and one acknowledgement reporting the incoming
-  order's executed and remaining quantities.
-- Business rejections, connection-scoped duplicate client-ID detection, TCP
-  fragmentation/coalescing, and bounded transport buffering.
-
-Compute Trade defines its own wire schema.
-This milestone has no cancel/amend, maker fill notifications, market-data feed,
-authentication, persistence, or recovery. CPU isolation, Redzone scheduling, and
-cache-performance experiments come later.
+The exchange is for local experimentation. Session identities and permitted
+firms come from its startup configuration. Access to the loopback listener is
+the trust boundary.
 
 ## Build and test
 
-Requirements: Linux, CMake 3.28 or newer, Ninja, a C++26 compiler such as
-`g++-16`, and Python 3.10 or newer for the tests. `just` is optional. The local
-compiler used for development is GCC 16.0.1.
-
-The default dependency path is `../simplx`. From the Compute Trade repository
-root, create a fresh sibling checkout if needed:
+Use Linux, CMake 3.28 or newer, Ninja, a C++26 compiler, Python 3.10 or newer,
+and the json-c development package. On Ubuntu the CMake dependencies include
+`pkg-config` and `libjson-c-dev`. The baseline Simplx revision is
+`c0b2ca712f1c187b6c120d5bcaf441bdff1600ae`. Keep a sibling checkout or point
+at another checkout with `-DSIMPLX_SOURCE_DIR=/path/to/simplx`.
 
 ```sh
 git clone https://github.com/rthickling/simplx.git ../simplx
-git -C ../simplx checkout c0b2ca712f1c187b6c120d5bcaf441bdff1600ae
+git -C ../simplx switch --detach c0b2ca712f1c187b6c120d5bcaf441bdff1600ae
+CXX=g++-16 cmake --preset acceptance
+cmake --build --preset acceptance --parallel
+ctest --test-dir build/acceptance --output-on-failure
 ```
 
-That revision is the implementation baseline used here. Compute Trade builds the
-Simplx engine directly; its tutorials and Google Test submodule are not required.
-An existing checkout elsewhere can be selected by adding
-`-DSIMPLX_SOURCE_DIR=/absolute/path/to/simplx` to the configure command.
+The application needs three allowed physical cores. The tests launch
+ordinary pinned workers and ephemeral loopback sockets. Allow a few seconds
+for the test run after the build. The `debug` and `release` presets run component
+checks, the original socket suite, and framework self-tests. The
+`acceptance` preset adds the live Optiq scenarios. See the
+[acceptance guide](tests/acceptance/README.md) for individual scenarios and
+evidence validators.
+
+For ASan and UBSan, point the sanitizer build at an unmodified checkout of
+Simplx `8b57604f68150ebf929ebecff0b895f263b8e2c3`, which includes the engine
+alignment fix. The original revision fails UBSan during engine startup.
+The focused `simplx_alignment` test exercises startup, handler registration
+and actual Simplx Event delivery.
 
 ```sh
-CXX=g++-16 cmake --preset debug
-cmake --build --preset debug --parallel 2
-ctest --preset debug
-
-CXX=g++-16 cmake --preset release
-cmake --build --preset release --parallel 2
-ctest --preset release
+CXX=g++-16 cmake --preset sanitizers -DSIMPLX_SOURCE_DIR=/path/to/fixed/simplx \
+  -DCOMPUTE_TRADE_ACCEPTANCE_LIVE=ON
+cmake --build --preset sanitizers --parallel
+UBSAN_OPTIONS=print_stacktrace=1 ctest --preset sanitizers
 ```
 
-The equivalent convenience commands are:
+The Optiq subset codec is maintained in
+[`optiq.hpp`](include/compute_trade/optiq.hpp). The wire oracle uses
+independent fixtures derived from the
+[published v354 XML](https://connect.euronext.com/sites/default/files/it-documentation/oeg_binary_sbe_input_354.xml).
+The earlier Compute Trade SBE schema and its generated headers remain for
+the original compatibility mode. Regenerate those with
+`python3 tools/generate_sbe.py` and check with
+`python3 tools/generate_sbe.py --check`. Both commands require Java 17 or
+newer when regenerating. Use `--jar` for an offline copy of the pinned
+1.41.0 generator.
+
+## Run
+
+Start the exchange from the repository root with the sample configuration.
 
 ```sh
-just test debug
-just test release
-just check
+./build/acceptance/bin/ct_exchange --config config/local.json
 ```
 
-`just` defaults to `g++-16`; override with `CXX=/path/to/compiler`. Use a fresh
-build directory when switching compilers.
-
-## VS Code navigation
-
-Open the Compute Trade folder in VS Code with Microsoft's C/C++ extension.
-The workspace settings use `build/debug/compile_commands.json` for compiler
-flags and include paths, and index the sibling Simplx headers and sources.
-Run `just configure debug` to generate or refresh the compilation database.
-Then use F12 (Go to Definition) or Ctrl-click to follow symbols into Simplx;
-Shift-F12 finds references. If navigation is stale, run **C/C++: Reset IntelliSense
-Database** from the Command Palette and allow indexing to finish.
-
-If Simplx lives somewhere other than `../simplx`, configure CMake with
-`SIMPLX_SOURCE_DIR` as described above and update the two Simplx browsing paths
-in `.vscode/settings.json` to match.
-
-To debug, open **Run and Debug** (Ctrl-Shift-D), select **Debug exchange (CMake)**,
-and press F5. This configures the Debug preset, builds the `ct_exchange` target,
-and launches it with GDB. Use this launch configuration instead of **build and
-debug active file**: the exchange needs CMake's include paths, other source
-files, and the Simplx library.
-
-Set a breakpoint in `MatchingEngineActor::onEvent` in `src/exchange.cpp`. Once
-the exchange prints `READY`, run `just inject 1 1` in a separate terminal to send
-one order. The injector currently waits five seconds for a response, so it may
-disconnect while you are stepping through the exchange.
-
-## Continuous integration
-
-[GitHub Actions](.github/workflows/build-and-test.yml) runs on pushes, pull
-requests, and manual dispatch. It builds and tests both Debug and Release with
-GCC 16.2 and Clang 22, using the same CMake presets as the local commands above.
-Each job checks out Simplx at the pinned revision documented above, then runs
-the codec, order-book, and real TCP integration tests. No privileged scheduling
-or dedicated CPU isolation is required. The four jobs report independently,
-and newer commits cancel older runs on the same branch or pull request.
-
-## Run the exchange and injector
-
-Start the exchange in one terminal:
+The READY line reports the TCP ports, the worker CPUs and the scheduling
+mode. The defaults are loopback ports 9000 for order entry and 9001 for
+market data. Start the subscriber in another terminal and wait for its
+ready message, then start a configured injector.
 
 ```sh
-./build/release/bin/ct_exchange
+python3 tools/market_subscriber.py --port 9001
 ```
-
-It defaults to `127.0.0.1:9000` and the first allowed Linux logical CPU. Its
-`READY` line reports the bound port, requested CPU, and CPU observed in each
-actor's constructor. The process checks that both actors started on that CPU.
-Use `--core CPU`, `--bind IPv4`, or `--port PORT` to select them explicitly;
-`--port 0` requests an ephemeral port. Stop with Ctrl-C after draining replies.
-
-From another terminal:
 
 ```sh
-./build/release/bin/ct_injector --count 1000 --window 64
-./build/release/bin/ct_injector --count 1000 --instrument 2
+./build/acceptance/bin/ct_injector --port 9000 \
+  --logical-access 1 --partition 1 --firm FIRM1 --count 10
 ```
 
-The injector alternates buys and sells at one price, using a new TCP connection
-for each invocation. `--window` controls the number sent before reading that
-batch's acknowledgements. Run `ct_injector --help` for host, port, price, and
-quantity options. It returns a failure exit code for rejected orders or transport
-and protocol errors.
+Orders match or rest and the subscriber prints the resulting updates.
+An injector disconnect cancels its live orders and publishes those removals.
+Stop the exchange with Ctrl-C and then stop the subscriber. A stream gap or
+subscriber loss requires a fresh run with an empty book.
 
-Convenience commands, also from separate terminals:
+See [Exchange architecture and limits](docs/architecture.md) for request
+correlation, limits, recovery and overload handling. Use the [RedZone guide](docs/redzone.md)
+for setup, qualification and rollback. The [workload guide](docs/workloads.md)
+and [matcher benchmark](docs/matcher-benchmark.md) describe reproducible
+measurements.
 
-```sh
-just exchange
-just inject 1000 64
-```
-
-`just exchange CPU release` chooses a CPU explicitly. These recipes build first;
-run the executables directly when the server is already running and no rebuild
-is needed.
-
-Injector throughput includes client processing, TCP, and the exchange. These
-numbers establish a functioning path; they are not measurements of cache hit
-latency or isolated matching-engine service time. The default alternating
-workload deliberately keeps the live book small.
-
-## SBE codecs
-
-Message headers and bodies use C++ codecs generated from
-[`schema/compute-trade.xml`](schema/compute-trade.xml) by the
-[SBE reference implementation](https://github.com/aeron-io/simple-binary-encoding),
-pinned to version 1.41.0. Generated headers are checked in, so normal builds need
-neither Java nor a generator download. The adapter retains SOFH transport framing
-and strict validation of the wire protocol.
-
-After changing the schema, regenerate with Python 3 and Java 17 or newer:
-
-```sh
-python3 tools/generate_sbe.py
-python3 tools/generate_sbe.py --check
-```
-
-The script downloads the pinned generator from Maven Central and verifies its
-SHA-256. For offline regeneration, supply `--jar /path/to/sbe-all-1.41.0.jar`.
-Set `JAVA=/path/to/java` to select a runtime. CI checks that generated headers
-match the schema. See [upstream attribution](third_party/sbe/README.md).
-
-## Tests and implementation
-
-CTest runs SBE codec tests, matching tests, and a Python integration suite that
-starts the real exchange and injector. The Python tests independently construct
-and decode wire bytes, and check same-CPU startup, matching, instrument/session
-separation, rejection paths, fragmented/coalesced TCP frames, pipelining,
-half-close, abandoned replies, and command-line validation.
-
-See the [acceptance test guide](tests/acceptance/README.md) for the independent
-wire fixtures, reference matcher, live acceptance suite, sanitizer preset and
-run-evidence checks. Framework self-tests run in the standard CTest suite.
-
-See [the architecture notes](docs/architecture.md) for actor responsibilities,
-allocation, protocol details, and current limits. The main entry points are:
-
-- [Actor implementation](src/exchange.cpp)
-- [Allocator-aware order book](include/compute_trade/order_book.hpp)
-- [Wire schema](schema/compute-trade.xml) and [codec](include/compute_trade/sbe.hpp)
-- [External injector](src/injector.cpp)
+The original TCP protocol remains available when the exchange is started
+without `--config`. Start the injector without `--logical-access` for that
+mode. This preserves the earlier development and test workflow.

@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass, replace
 
-
 BUY = 1
 SELL = 2
 LIMIT = 2

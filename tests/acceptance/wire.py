@@ -9,8 +9,8 @@ XML SHA-256: 00764cc43fdd89efd7bceb145ee055489d2805ff174b4654683d2f820bf70c83
 """
 
 import struct
+from collections.abc import Sequence
 from dataclasses import dataclass
-
 
 SCHEMA_ID = 0
 VERSION = 354
@@ -55,7 +55,7 @@ class Message:
 @dataclass(frozen=True)
 class Layout:
     fixed: struct.Struct
-    fields: list[str]
+    fields: Sequence[str]
     group_lengths: tuple[int, ...] = ()
 
 
@@ -133,12 +133,12 @@ _LAYOUTS = {
     ),
     LOGON: Layout(
         struct.Struct("<IHI8sB"),
-        "logical_access_id partition_id last_sequence software_provider queueing_indicator".split(),
+        ["logical_access_id", "partition_id", "last_sequence", "software_provider", "queueing_indicator"],
     ),
-    LOGON_ACK: Layout(struct.Struct("<8sI"), "exchange_id last_client_sequence".split()),
+    LOGON_ACK: Layout(struct.Struct("<8sI"), ["exchange_id", "last_client_sequence"]),
     LOGON_REJECT: Layout(
         struct.Struct("<8sBII"),
-        "exchange_id logon_reject_code last_client_sequence last_sequence".split(),
+        ["exchange_id", "logon_reject_code", "last_client_sequence", "last_sequence"],
     ),
 }
 

@@ -1,240 +1,151 @@
-# Initial exchange architecture
+# Exchange architecture and limits
 
-The first implementation establishes an observable order path that can later be
-used for cache experiments. It uses the `rthickling/simplx` fork at baseline
-`c0b2ca712f1c187b6c120d5bcaf441bdff1600ae`.
+## Order entry and ownership
 
-## Actors and execution placement
+An Optiq session is identified by the Logical Access ID and OE Partition ID
+in Logon. The access has an allowlist of executing firms. A firm owns the
+orders it enters and may cancel or amend via any session on which it is
+authorised. Each order retains its original session for disconnect handling.
+An exchange Order ID is unique during the run and is stable across a
+successful amendment. Cancel and amend look it up by instrument, side and
+firm. When both IDs are present the exchange Order ID takes precedence.
+Requests addressed only by Original Client Order ID are rejected.
 
-`Exchange` constructs a Simplx `CoreSet` containing exactly one Linux logical
-CPU ID, then registers the matching-engine service before the ordinary OEG actor on
-that CPU. The service outlives the OEG during shutdown. Both actors execute serially on that event loop. Their constructor
-calls to `sched_getcpu()` are checked against the requested CPU and reported in
-the executable's `READY` line.
+Each resting order records its instrument, side, maker price, remaining
+quantity, executed quantity, priority, firm and original session. A limit
+order executes at the best eligible resting price, oldest first at that
+price. It may consume multiple makers and leave a resting remainder.
+An amendment supplies the new total quantity including earlier executions.
+A reduction in total quantity alone preserves priority. A price change or
+size increase gets fresh priority and executes immediately when crossing.
+The new total must exceed executed quantity. Rejected changes leave the
+original live order intact. Side and order type are fixed.
 
-```mermaid
-sequenceDiagram
-    participant C as External injector
-    participant O as OEG actor
-    participant M as Matching-engine actor
-    Note over O,M: One pinned Simplx event loop
-    C->>O: TCP bytes: SOFH + SBE NewOrder
-    O->>O: Assemble frame, decode, check duplicate ID
-    O->>M: Request event containing value copy
-    M->>M: Route instrument, validate, match, rest remainder
-    M->>O: Response event containing acknowledgement
-    O->>C: TCP bytes: SOFH + SBE Acknowledgement
-```
+## TCP contract
 
-The arrows between actors are Simplx events; they are not direct calls between
-objects. Same-loop dispatch avoids a cross-core actor hand-off on this path,
-while preserving the event allocation and scheduling mechanisms we want to
-study. TCP kernel work and the external client have their own execution costs.
+The supported Optiq envelope starts with five little-endian 16-bit values
+in order: inclusive frame length, fixed block length, template ID, schema
+ID, and version. The Optiq subset uses schema 0 and version 354.
+The gateway can assemble fragmented frames and process coalesced frames.
+A frame with invalid length, layout, or an unsupported template closes its
+connection. Supported layouts include NewOrder (01), Ack (03), Fill (04),
+Kill (05), CancelReplace (06), Reject (07), CancelRequest (12) and Logon
+(100 through 102). Optional groups carry their v354 headers and are empty
+in the supported workflow. The selected segment is continuous lit limit
+trading. Use instrument IDs configured for this run and prices in integer
+ticks. [Optiq OEG SBE specification](https://connect.euronext.com/sites/default/files/it-documentation/Optiq%20OEG%20SBE%20Messages%20-%20Interface%20Specification%20-%20Euronext%20Cash%20and%20Derivatives%20Markets%20-%20External%20-%20v5.354.0.pdf)
 
-The OEG uses nonblocking POSIX sockets in an actor callback. It accepts at most
-one connection per callback and performs at most one `recv` and one `send` per
-session per callback. It then registers its callback again. Parsing and in-flight
-credits are bounded, allowing matching events to run between polling iterations.
-A single matching request can still sweep many resting orders; matching work
-depends on the book and incoming order.
+Every framed request receives one Ack, Kill or Reject carrying its
+Client Order ID. Ack Type identifies entry or replace. It includes the
+exchange ID, the submitted total quantity, symbol, side, limit price,
+priority and the executed-on-entry flags. Fill (04) identifies each side's
+order and execution, maker price, execution quantity and leaves after that
+fill. Private fills and disconnect Kill notices carry the signed numeric
+null Client Order ID. Kill reason 1 identifies requested cancellation and
+11 identifies automatic cancellation on disconnect. Sequence numbers describe
+the private stream, including unsolicited messages. The request response
+precedes each fill produced by that command for its initiator.
+Book IN and Trade Time are UTC epoch times in nanoseconds. Trade Time is
+recorded once per matching command and shared by both sides of its fills.
+Unmeasured optional gateway transport timings use their numeric nulls.
 
-Scheduling is normal Linux scheduling. Affinity pins the Simplx loop to a logical
-CPU; it does not reserve that CPU, isolate its SMT sibling, move interrupts, or
-enable Redzone. Inspect the machine before selecting a CPU, for example with
-`lscpu -e=CPU,CORE,SOCKET,ONLINE` and `taskset -pc $$`. The runtime accepts only
-CPUs allowed by its inherited affinity mask and representable by Simplx's
-8-bit `CoreId` (`0..255`).
+Reject Error Code is local to this exchange. Values 1 through 7 indicate
+invalid or unsupported request, unauthorised firm, unknown instrument,
+unknown or inaccessible exchange ID, incompatible or invalid amendment,
+capacity limit, and invalid inbound sequence, respectively. Reject carries
+the request template and its supplied Order ID field. Transport errors may
+close the stream without a reply.
 
-## Matching and order ownership
+## Sequencing, publication and memory
 
-The matching actor owns one order book per configured instrument. The executable
-enables instruments `1` and `2`; the C++ `ExchangeConfig` permits another explicit
-set. Instruments do not match against each other.
+The gateway and matcher run on one Simplx event loop. The gateway accepts
+at most one new connection per callback and rotates the first connection
+polled. In a callback it can assemble at most one complete frame per
+connection, in order, and appends the command to a bounded FIFO. A detected
+connection close takes a place in the same ordering. Under available
+capacity the global command number, matching and full encoded Ack are
+produced in the callback that finishes reading the frame. Socket writes
+are subsequent operations with independent partial-write state.
 
-Each book contains a descending map of bid prices and an ascending map of ask
-prices. Every price level contains a FIFO list of resting orders. An incoming
-buy consumes the cheapest eligible asks; a sell consumes the highest eligible
-bids. Trades use the resting order's price. The incoming order's unfilled
-remainder joins the end of its price-level queue.
+The matcher plans exact book and output changes before applying them. It
+checks live order, price and sweep limits, notice reservations, complete
+private reply space, and publication credits. A temporary shortage at the
+head pauses matching while output drains. Later requests remain queued.
+Intake pauses if the command queue fills. Private writes with no progress for
+30 seconds close the connection. Losing the market subscriber after it
+becomes ready, or blocking publication for 30 seconds, invalidates the
+market view and ends the run.
 
-This is a readable price/time-priority implementation using standard maps and
-lists. Pointer traversal, node sizes, size-class rounding, and reuse will all
-matter in later cache work. No cache-residency property follows merely from the
-container choice or allocator.
+The publisher owns its own socket. The matching worker sends immutable
+update batches through Simplx Events and the publisher assigns consecutive
+market sequence numbers. Each update contains the command number, action,
+instrument, order ID, side, price, remaining quantity, and priority.
+The subscriber connects before the first order and receives its ready
+message before building the book from an empty state. A missing market
+sequence invalidates that view.
 
-Client order IDs must be nonzero and must not use the reserved `uint64` null
-value (`2^64 - 1`). Side must be Buy or Sell, price must be positive, and quantity
-must be positive and not the reserved `uint64` null value. Unknown instruments
-are rejected. Every accepted order receives a unique increasing exchange order
-ID across the process, starting at `1`. IDs are not reused during that process;
-a restart starts the sequence again.
+The Actor allocator holds book records and price and ID indexes across
+requests. Simplx Events carry temporary handoff metadata. Bounded
+publication and disconnect arrays hold the records referred to by Events.
+The writer can reuse handoff slots when the receiving actor releases them.
+A bounded command count is sampled by the ordinary worker. Verbose
+diagnostics are available only when the explicitly local Unix control
+socket is enabled.
 
-Duplicate client IDs are scoped to a TCP connection. A syntactically decoded,
-nonzero client ID is consumed even when its order is subsequently rejected.
-Reusing it on the same connection yields `DuplicateClientOrderId`. A new
-connection may start at client ID `1` again.
+## Disconnect and replay
 
-For an accepted incoming order:
+When a session closes, the matcher cancels its remaining live orders at
+the disconnect command's place in the global sequence. Other sessions'
+orders and completed executions stand. Each live order reserves future
+notice capacity. Full fills and requested cancels release the reservation.
+Disconnect transfers the reservation to a compact Kill record. The matcher
+assigns its private sequence and hands records to the BlueZone actor in
+bounded batches. If the handoff is full, ready records remain in reserved
+storage. The BlueZone copy remains until client confirmation.
 
-```text
-executed_quantity + remaining_quantity = submitted_quantity
-```
+Every configured session has an independent private sequence and ordinary
+reply history. The history keeps the newest messages up to its limit
+and records each encoded reply before sending. Logon supplies the largest
+private sequence already processed. The exchange sends Logon Ack then
+retained messages in private sequence order. A missed ordinary reply that
+aged out is reported as an inclusive gap. The client records unknown
+outcomes and receives remaining messages, including unconfirmed notices.
+A ReplayComplete marker precedes processing new requests on that connection.
 
-The acknowledgement is a snapshot after processing that incoming order. A later
-trade against its resting remainder currently produces no notification to that
-maker. The book exposes a synchronous trade callback for unit tests, but the
-matching actor does not yet publish those trades externally. This milestone has
-no cancel, amend, market orders, session authentication, or trading-phase model.
+Compute Trade schema 1 version 1 adds template 200 Confirm with a uint32
+frontier, 201 ReplayGap with inclusive first and last uint32 sequences, and
+202 ReplayComplete with a uint32 frontier. A client can confirm the largest
+accounted-for sequence once it has recorded gaps and processed replay.
+Confirmations free retained notice capacity. After an interrupted replay,
+reconnect with the largest processed sequence and use the sequence numbers
+to identify duplicates. The injector emits a JSON report for incomplete
+recovery. An exchange restart starts new session state and private history.
 
-## Two allocation contexts
+## Configured limits
 
-The matching actor obtains `Actor::Allocator` from `getAllocator()`. Its
-instrument map, price maps, and FIFO lists explicitly use that allocator,
-including the nested lists. Allocating the outer map with an actor allocator
-alone would not redirect the inner list's allocations. The OEG also uses its
-actor allocator for session-list nodes and duplicate-ID sets.
+Set limits in the `limits` object of the exchange JSON. Defaults support 32
+configured instruments or session identities and up to 16 authorised firms
+per session. Socket slots are bounded by twice the configured session count
+plus four. Input storage is 4,096 bytes per connection and the supported
+frame envelope is 256 bytes. A full queue applies natural TCP backpressure.
 
-Those allocations belong to the event loop and are allocated, accessed, and
-freed there. Resting state contains owned copies of order information, so it
-survives the delivery of the event that created it.
+| Configuration | Default | Effect |
+| --- | --- | --- |
+| `live_orders_total` | 1024 | Global live index and book limit |
+| `live_orders_per_session` | 64 | Live orders and maximum disconnect removal work per session |
+| `active_prices` | 512 | Active price levels across instruments and sides |
+| `matching_max_fills` | 16 | Maximum maker fills per order or amendment |
+| `command_queue_capacity` | 128 | Waiting commands in the global FIFO |
+| `reply_slots_per_session` | 64 | Unsent private frame slots per connection |
+| `ordinary_replay_capacity` | 128 | Newest ordinary messages retained per session |
+| `notice_slots` | 2048 | Live reservations plus unconfirmed disconnect notices |
+| `notice_handoff_slots` | 4 | In-flight notice batches |
+| `notice_batch_size` | 32 | Maximum records per notice batch |
+| `publication_capacity` | 1024 | Outstanding immutable market updates |
 
-`Event::Pipe::push<Request>` and `push<Response>` use Simplx's separate event
-allocator. Events carry small value payloads and are reclaimed under Simplx's
-event-lifetime rules. The implementation retains no pointer into a delivered
-event. In this milestone both ends are on the same loop; cross-core market-data
-delivery will be a later extension.
-
-Neither allocator pins storage into L1, L2, or L3. Determining cache behaviour
-requires measurements of the repeatedly accessed working set and actual memory
-accesses.
-
-## Wire protocol
-
-[The XML schema](../schema/compute-trade.xml) describes two fixed-size SBE
-messages, using schema ID `1`, schema version `0`, and a little-endian message
-header and body. [The adapter](../include/compute_trade/sbe.hpp) uses C++ codecs
-generated by the [SBE reference implementation](https://github.com/aeron-io/simple-binary-encoding)
-(version 1.41.0). SOFH framing and domain validation remain in the adapter. It accepts exactly
-the layouts below, with strict version, template, block-length, and frame-length
-checks. Future extensions require an explicit implementation change.
-
-Each TCP frame starts with the six-byte Simple Open Framing Header (SOFH):
-
-| Offset | Field | Encoding |
-|---|---|---|
-| 0 | Message length, including SOFH | `uint32`, big endian |
-| 4 | Encoding type | `uint16`, big endian, `0xEB50` |
-
-The following eight bytes are the SBE header: `uint16` block length, template ID,
-schema ID, and schema version, all little endian. Message field offsets below
-are relative to the start of the body after both headers.
-
-| NewOrder field | Offset | Type |
-|---|---:|---|
-| Client order ID | 0 | `uint64` |
-| Instrument ID | 8 | `uint32` |
-| Side | 12 | `uint8`: Buy=1, Sell=2 |
-| Price | 13 | `int64` |
-| Quantity | 21 | `uint64` |
-
-NewOrder uses template ID `1`, block length `29`, and total frame size `43`.
-
-| Acknowledgement field | Offset | Type |
-|---|---:|---|
-| Client order ID | 0 | `uint64` |
-| Exchange order ID | 8 | `uint64` |
-| Instrument ID | 16 | `uint32` |
-| Status | 20 | `uint8`: Accepted=0, Rejected=1 |
-| Reject reason | 21 | `uint8` |
-| Executed quantity | 22 | `uint64` |
-| Remaining quantity | 30 | `uint64` |
-
-Acknowledgement uses template ID `2`, block length `38`, and total frame size
-`52`. Reject reasons are None=0, MalformedMessage=1, InvalidOrder=2,
-UnknownInstrument=3, and DuplicateClientOrderId=4. Rejections carry exchange
-order ID `0` and zero executed/remaining quantity.
-
-Invalid SOFH encoding or a declared frame length outside `14..256` closes the
-offending connection. A complete frame with valid SOFH but invalid SBE layout
-gets a malformed-message acknowledgement with client ID `0` because the request
-could not be reliably decoded. Rejections follow the same actor path as accepted
-orders, preserving response order within a connection.
-
-### SOFH framing helpers
-
-TCP delivers a stream of bytes: a read can contain part of a message or several
-messages together. SOFH supplies the total frame length so the receiver can
-wait for a complete frame and separate it from the next one. The length includes
-all three parts: the six-byte SOFH, the eight-byte SBE header, and the SBE body.
-It differs from the SBE block length, which describes the fixed body block.
-
-[`sbe.hpp`](../include/compute_trade/sbe.hpp) is a handwritten adapter;
-only the files under `include/compute_trade/generated/` are generated codecs.
-The adapter implements these framing helpers:
-
-- `read_be32(span<const byte>)` reads the first four bytes as an unsigned
-  big-endian integer. Each step shifts the accumulated value left eight bits
-  and inserts the next byte with bitwise OR. It requires at least four bytes;
-  `frame_length()` checks for the full six-byte header before calling it.
-- `write_sofh(span<byte>)` takes a view of the **whole frame**, uses its size as
-  the length, and writes only the first six bytes. Shifts of 24, 16, 8, and 0
-  extract the length's bytes in big-endian order. It then writes `EB 50`, the
-  identifier for little-endian SBE. The span must contain at least six bytes
-  and its size must fit in `uint32_t`; our callers use fixed-size frame arrays.
-
-For example, a NewOrder frame begins with `00 00 00 2B EB 50`: `0x2B` is 43,
-the sum of 6 framing bytes, 8 SBE header bytes, and 29 body bytes. SOFH is big
-endian even though this schema's SBE header and body are little endian. Explicit
-byte operations work independently of host byte order and buffer alignment.
-The spans borrow existing storage; neither helper allocates or copies a frame.
-
-Published references:
-
-- [FIX Trading Community: SOFH](https://fixtrading.org/sofh/).
-- [SOFH field definitions and byte order](https://github.com/FIXTradingCommunity/fix-simple-open-framing-header/blob/master/v1-1-RC1/sofh.md)
-  (version 1.1 release candidate 1).
-- [FIX SBE wire examples](https://github.com/FIXTradingCommunity/fix-simple-binary-encoding/blob/master/v1-0-RC4/doc/07Examples.md),
-  showing the `EB50` identifier and the distinction between SOFH and SBE byte order.
-
-## Buffering, disconnects, and failure limits
-
-The OEG permits at most 16 active sessions. Each session has a fixed 2,048-byte
-receive buffer, 32 acknowledgement slots, and 32 outstanding credits shared
-between pending matching requests and replies awaiting transmission. Reads and
-parsing pause as credits fill, allowing TCP backpressure to reach the sender.
-Partial reads/writes are retained across callbacks. Excess accepted connections
-are closed immediately.
-
-When a client half-closes its write side, complete requests already buffered are
-processed and their replies drained. An incomplete trailing frame is discarded
-when the session closes. After a disconnect, already-submitted orders may still
-be processed and resting orders remain in the book; replies for a removed
-session are discarded. Internal session IDs are never reused, preventing a late
-reply from reaching a new connection.
-
-Transport buffers are bounded, but resting books and the per-session duplicate-ID
-sets can grow with accepted traffic and connection lifetime. There is no book
-capacity limit or deduplication-retention policy yet.
-
-Allocation failures, actor exceptions, and unexpected listener failures mark the
-exchange as failed and stop it. Matching is not transactional under allocation
-or trade-callback failure: fills already applied are not rolled back. Recovery,
-durability, replication, and exchange-grade admission controls remain future
-work.
-
-## What the current tests establish
-
-- Codec tests check known byte vectors, round trips, bounds, and malformed input.
-- Book tests check price/time priority, maker prices, partial fills, sweeps,
-  invalid orders, large quantities, and use of a stateful allocator.
-- Python integration tests independently encode/decode the wire format and run
-  the real TCP actors, including the external injector, same-CPU startup,
-  independent instruments and sessions, rejects, fragmentation, pipelining,
-  half-close, and disconnects with work outstanding.
-
-The injector alternates same-price buys and sells, so its default workload keeps
-the live book small. Its reported throughput uses client wall time and includes
-socket calls, protocol work, event dispatch, and matching. Increasing the message
-count or rate alone does not establish an L1-to-L2-to-L3-to-memory transition.
-Later experiments must vary the actively touched book state separately from
-arrival rate and distinguish cache effects from queue growth.
+The maximum single-command publication batch must fit the configured
+publisher capacity. Orders beyond a logical order, sweep, reply-per-command,
+price or notice limit receive a rejection before book mutation. Retries use
+the next inbound sequence and a suitable request identifier. Exhausting an
+identifier or hitting an internal invariant stops the run. Operating rates
+and sustained backlog evidence are reported by the paced workload runner.

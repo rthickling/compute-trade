@@ -1,10 +1,10 @@
 """Transport, admission, and observable order-path cases."""
 
+import itertools
 import json
 import os
-from pathlib import Path
-import socket
 import subprocess
+from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from . import wire
@@ -39,7 +39,7 @@ def case_fragmented_and_coalesced(exchange):
     last = client.encode_new_order(103, 1, wire.SELL, 105, 2)
 
     offsets = (0, 1, wire.HEADER.size - 1, len(first) - 1)
-    for start, end in zip(offsets, offsets[1:]):
+    for start, end in itertools.pairwise(offsets):
         client.send(first[start:end])
         exchange.wait_for("input_buffered", buffered_bytes=end, **SESSION)
         assert exchange.snapshot()["orders"] == []
@@ -235,7 +235,9 @@ def case_actual_simplx_iteration(exchange):
     assert same_iteration(resting, worker) > incomplete["iteration"]
 
     buyer.new_order(151, 1, wire.BUY, 100, 2)
-    acks(buyer, 151)
+    full_ack = acks(buyer, 151)
+    buyer.expect(wire.FILL, order_id=full_ack.fields["order_id"],
+                 execution_quantity=2, leaves_quantity=0)
     full = completed(exchange, 151, OTHER)
     assert [fill["quantity"] for fill in full["fills"]] == [2]
     same_iteration(full, worker)
@@ -270,13 +272,17 @@ def case_private_fills_and_replay(exchange):
     buyer.new_order(172, 1, wire.BUY, 101, 4, firm="FIRM2")
     buy_ack = buyer.expect(wire.ACK, client_order_id=172, ack_type=wire.NEW_ORDER_ACK, quantity=4)
     assert buy_ack.fields["ack_qualifiers"] & mask == mask, buy_ack
+    assert 0 < buy_ack.fields["book_in_time"] < (1 << 64) - 1, buy_ack
     common = {"client_order_id": wire.NULL_CLIENT_ORDER_ID, "symbol_index": 1}
+    sold = []
     for session, ack, price, leaves in [
         (first, first_ack, 100, 0), (second, second_ack, 101, 1)
     ]:
-        session.expect(wire.FILL, order_id=ack.fields["order_id"], side=wire.SELL,
-                       execution_price=price, execution_quantity=2, leaves_quantity=leaves,
-                       sequence=ack.fields["sequence"] + 1, **common)
+        sold.append(session.expect(
+            wire.FILL, order_id=ack.fields["order_id"], side=wire.SELL,
+            execution_price=price, execution_quantity=2, leaves_quantity=leaves,
+            sequence=ack.fields["sequence"] + 1, **common
+        ))
     bought = []
     for index, (price, leaves) in enumerate([(100, 2), (101, 0)], start=1):
         bought.append(buyer.expect(
@@ -284,6 +290,10 @@ def case_private_fills_and_replay(exchange):
             execution_price=price, execution_quantity=2, leaves_quantity=leaves,
             sequence=buy_ack.fields["sequence"] + index, **common
         ))
+    for maker_fill, taker_fill in zip(sold, bought, strict=True):
+        timestamp = maker_fill.fields["trade_time"]
+        assert 0 < timestamp < (1 << 64) - 1
+        assert timestamp == taker_fill.fields["trade_time"]
     buyer.close(reset=True)
     exchange.wait_for("command_complete", kind="disconnect", logical_access_id=3, partition_id=1)
     returning = exchange.connect(access=3, last_processed=buy_ack.fields["sequence"])

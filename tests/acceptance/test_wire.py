@@ -9,7 +9,6 @@ import unittest
 
 from . import wire
 
-
 LOGON_FRAME = bytes.fromhex("""
     1d 00 13 00 64 00 00 00 62 01
     04 03 02 01 06 05 0a 09 08 07 00 00 00 00 00 00 00 00 01
@@ -199,9 +198,11 @@ class WireTest(unittest.TestCase):
             (bytes.fromhex("92 00") + ACK_FRAME[2:] + b"\x00", "trailing frame bytes"),
         )
         for frame, error in cases:
-            with self.subTest(error=error, frame=frame.hex()):
-                with self.assertRaisesRegex(ValueError, error):
-                    wire.decode_frame(frame)
+            with (
+                self.subTest(error=error, frame=frame.hex()),
+                self.assertRaisesRegex(ValueError, error),
+            ):
+                wire.decode_frame(frame)
 
 
 if __name__ == "__main__":

@@ -2,9 +2,9 @@
 
 import argparse
 import inspect
-from pathlib import Path
 import sys
 import unittest
+from pathlib import Path
 
 from . import cases_book, cases_flow, cases_transport
 from .driver import launch

@@ -1,0 +1,10 @@
+{
+  "instruments": [1, 2],
+  "sessions": [
+    {"logical_access_id": 1, "partition_id": 1, "firms": ["FIRM1", "FIRM2"]},
+    {"logical_access_id": 2, "partition_id": 1, "firms": ["FIRM1"]},
+    {"logical_access_id": 3, "partition_id": 1, "firms": ["FIRM2"]},
+    {"logical_access_id": 4, "partition_id": 1, "firms": ["FIRM3"]}
+  ],
+  "limits": {}
+}

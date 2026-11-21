@@ -1,3 +1,10 @@
+# yaml-language-server: $schema=
 CompileFlags:
   CompilationDatabase: build/debug
   Remove: [-freflection]
+  Add:
+    - -std=c++26
+    - -DTREDZONE_E2E=0
+    - -Iinclude
+    - -I../simplx/include
+    - -I../simplx

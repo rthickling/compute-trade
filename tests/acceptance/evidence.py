@@ -45,18 +45,22 @@ order. Inspect the returned counts when comparing work across footprints.
 """
 
 import argparse
-from collections import Counter, defaultdict
 import hashlib
 import json
+from collections import Counter, defaultdict
 from pathlib import Path
 from statistics import median
-
 
 SCENARIOS = ("thin_quiet", "deep_quiet", "thin_shock", "deep_shock")
 OPERATIONS = ("new", "cancel", "replace")
 PHASES = ("quiet", "shock", "replenishment")
 TIMING_EXCLUSIONS = {
-    "tcp", "sbe_decode", "acknowledgements", "publication", "notice_replay", "statistics",
+    "tcp",
+    "sbe_decode",
+    "acknowledgements",
+    "publication",
+    "notice_replay",
+    "statistics",
 }
 
 
@@ -66,7 +70,9 @@ def require(condition, context, requirement):
 
 
 def nonnegative(value, context):
-    require(type(value) is int and value >= 0, context, "expected a nonnegative integer")
+    require(
+        type(value) is int and value >= 0, context, "expected a nonnegative integer"
+    )
     return value
 
 
@@ -88,7 +94,9 @@ def validate_counts(counts, context):
 
 def trace_id(scenario):
     inputs = {field: scenario[field] for field in ("initial_book", "commands")}
-    canonical = json.dumps(inputs, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    canonical = json.dumps(
+        inputs, sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
@@ -117,7 +125,11 @@ def starting_liquidity(book, instrument, band, context):
 def observations(scenario, name):
     commands = scenario["commands"]
     observed = scenario["observations"]
-    require(commands and len(commands) == len(observed), name, "need one observation per command")
+    require(
+        commands and len(commands) == len(observed),
+        name,
+        "need one observation per command",
+    )
     command_ids = set()
     previous_time = -1
     pressure = []
@@ -125,14 +137,23 @@ def observations(scenario, name):
     for command, result in zip(commands, observed, strict=True):
         command_id = command["id"]
         context = f"{name}/{command_id}"
-        require(command_id not in command_ids and result["id"] == command_id,
-                context, "duplicate command or mismatched observation ID")
+        require(
+            command_id not in command_ids and result["id"] == command_id,
+            context,
+            "duplicate command or mismatched observation ID",
+        )
         command_ids.add(command_id)
         timestamp = nonnegative(command["planned_ns"], context)
-        require(timestamp >= previous_time, context, "commands must be scheduled in order")
+        require(
+            timestamp >= previous_time, context, "commands must be scheduled in order"
+        )
         previous_time = timestamp
         operation, phase = command["operation"], command["phase"]
-        require(operation in OPERATIONS and phase in PHASES, context, "unknown operation or phase")
+        require(
+            operation in OPERATIONS and phase in PHASES,
+            context,
+            "unknown operation or phase",
+        )
         for field in ("best_bid", "best_ask"):
             if result[field] is not None:
                 positive(result[field], f"{context}.{field}")
@@ -141,23 +162,43 @@ def observations(scenario, name):
             positive(fill["price"], f"{context} fill price")
             positive(fill["quantity"], f"{context} fill quantity")
         crossed = list(dict.fromkeys(fill["price"] for fill in result["fills"]))
-        require(result["prices_crossed"] == crossed, context, "crossed prices do not match ordered fills")
+        require(
+            result["prices_crossed"] == crossed,
+            context,
+            "crossed prices do not match ordered fills",
+        )
         if operation in ("new", "replace"):
             require(command["side"] in (1, 2), context, "invalid order side")
             positive(command["quantity"], context)
             positive(command["price"], context)
             if phase == "shock" and command["side"] == 2:
-                pressure.append((timestamp, operation, command["instrument"], command["price"], command["quantity"]))
+                pressure.append(
+                    (
+                        timestamp,
+                        operation,
+                        command["instrument"],
+                        command["price"],
+                        command["quantity"],
+                    )
+                )
         if phase == "shock" and operation == "cancel":
             shock_cancelled.append(nonnegative(result["cancelled_quantity"], context))
     actual_phases = {command["phase"] for command in commands}
     if name.endswith("_shock"):
-        require(pressure and "replenishment" in actual_phases, name, "need sell pressure and replenishment")
+        require(
+            pressure and "replenishment" in actual_phases,
+            name,
+            "need sell pressure and replenishment",
+        )
         levels = {"quiet": 0, "shock": 1, "replenishment": 2}
         phases = [levels[command["phase"]] for command in commands]
-        require(phases == sorted(phases), name, "replenishment must follow the sell shock")
+        require(
+            phases == sorted(phases), name, "replenishment must follow the sell shock"
+        )
     else:
-        require(actual_phases == {"quiet"}, name, "quiet workload contains a shock phase")
+        require(
+            actual_phases == {"quiet"}, name, "quiet workload contains a shock phase"
+        )
     return pressure, shock_cancelled
 
 
@@ -173,26 +214,53 @@ def validate_traces(trace, regenerated):
     for name in SCENARIOS:
         scenario = scenarios[name]
         require(type(scenario["seed"]) is int, name, "seed must be an integer")
-        liquidity[name] = starting_liquidity(scenario["initial_book"], scenario["instrument"], band, name)
+        liquidity[name] = starting_liquidity(
+            scenario["initial_book"], scenario["instrument"], band, name
+        )
         pressure, cancelled = observations(scenario, name)
         scripted_pressure[name] = pressure
         if cancelled:
-            require(scenario.get("cancel_rule"), name, "missing shock cancellation rule")
+            require(
+                scenario.get("cancel_rule"), name, "missing shock cancellation rule"
+            )
         cancelled_units[name] = sum(cancelled)
     for depth in ("thin", "deep"):
         quiet = scenarios[f"{depth}_quiet"]
         shock = scenarios[f"{depth}_shock"]
-        require(quiet["initial_book"] == shock["initial_book"] and quiet["instrument"] == shock["instrument"],
-                depth, "quiet and shock runs must start from the same book")
-    require(all(a < b for a, b in zip(liquidity["thin_quiet"], liquidity["deep_quiet"], strict=True)),
-            "starting books", "deep must contain more near-best quantity on both sides")
-    require(scripted_pressure["thin_shock"] == scripted_pressure["deep_shock"],
-            "shock traces", "planned sell timing, size, price limit, or operation differs")
-    require(scenarios["thin_shock"].get("cancel_rule") == scenarios["deep_shock"].get("cancel_rule"),
-            "shock traces", "cancellation rules differ")
+        require(
+            quiet["initial_book"] == shock["initial_book"]
+            and quiet["instrument"] == shock["instrument"],
+            depth,
+            "quiet and shock runs must start from the same book",
+        )
+    require(
+        all(
+            a < b
+            for a, b in zip(
+                liquidity["thin_quiet"], liquidity["deep_quiet"], strict=True
+            )
+        ),
+        "starting books",
+        "deep must contain more near-best quantity on both sides",
+    )
+    require(
+        scripted_pressure["thin_shock"] == scripted_pressure["deep_shock"],
+        "shock traces",
+        "planned sell timing, size, price limit, or operation differs",
+    )
+    require(
+        scenarios["thin_shock"].get("cancel_rule")
+        == scenarios["deep_shock"].get("cancel_rule"),
+        "shock traces",
+        "cancellation rules differ",
+    )
     return {
-        name: {"trace_id": trace_id(scenarios[name]), "near_best_buy_quantity": liquidity[name][0],
-               "near_best_sell_quantity": liquidity[name][1], "shock_cancelled_units": cancelled_units[name]}
+        name: {
+            "trace_id": trace_id(scenarios[name]),
+            "near_best_buy_quantity": liquidity[name][0],
+            "near_best_sell_quantity": liquidity[name][1],
+            "shock_cancelled_units": cancelled_units[name],
+        }
         for name in SCENARIOS
     }
 
@@ -208,28 +276,69 @@ def request_timeline(command, row, context, drain_until):
         nonnegative(stamp, context)
     for stamp in (encoded, *attempts, submitted, decoded, correlated):
         if stamp is not None:
-            require(nonnegative(stamp, context) <= drain_until, context, "event after drain deadline")
+            require(
+                nonnegative(stamp, context) <= drain_until,
+                context,
+                "event after drain deadline",
+            )
     if attempts:
-        require(encoded is not None and encoded <= attempts[0], context, "first send attempt precedes encoding")
-        require(attempts == sorted(attempts), context, "send attempt times are out of order")
-        require(row.get("lateness_ns") == attempts[0] - command["planned_ns"],
-                context, "lateness must use the first send attempt")
+        require(
+            encoded is not None and encoded <= attempts[0],
+            context,
+            "first send attempt precedes encoding",
+        )
+        require(
+            attempts == sorted(attempts), context, "send attempt times are out of order"
+        )
+        require(
+            row.get("lateness_ns") == attempts[0] - command["planned_ns"],
+            context,
+            "lateness must use the first send attempt",
+        )
     else:
-        require(row.get("lateness_ns") is None, context, "unattempted command has lateness")
+        require(
+            row.get("lateness_ns") is None, context, "unattempted command has lateness"
+        )
     if submitted is not None:
-        require(attempts and attempts[-1] <= submitted, context, "submission precedes last send attempt")
+        require(
+            attempts and attempts[-1] <= submitted,
+            context,
+            "submission precedes last send attempt",
+        )
     if decoded is not None:
-        require(submitted is not None and submitted <= decoded, context, "decoding precedes full submission")
+        require(
+            submitted is not None and submitted <= decoded,
+            context,
+            "decoding precedes full submission",
+        )
     if correlated is not None:
-        require(decoded is not None and decoded <= correlated, context, "correlation precedes decoding")
-        require(outcome in ("accepted", "rejected"), context, "correlated reply lacks an outcome")
+        require(
+            decoded is not None and decoded <= correlated,
+            context,
+            "correlation precedes decoding",
+        )
+        require(
+            outcome in ("accepted", "rejected"),
+            context,
+            "correlated reply lacks an outcome",
+        )
         if row.get("rtt_ns") is not None:
-            require(row["rtt_ns"] == correlated - attempts[0], context, "RTT must use the first send attempt")
+            require(
+                row["rtt_ns"] == correlated - attempts[0],
+                context,
+                "RTT must use the first send attempt",
+            )
     else:
-        require(outcome is None and row.get("rtt_ns") is None, context, "uncompleted request has an outcome or RTT")
+        require(
+            outcome is None and row.get("rtt_ns") is None,
+            context,
+            "uncompleted request has an outcome or RTT",
+        )
     matcher_ns = row.get("matcher_ns")
     if matcher_ns is not None:
-        require(submitted is not None, context, "matcher timing without a submitted command")
+        require(
+            submitted is not None, context, "matcher timing without a submitted command"
+        )
         nonnegative(matcher_ns, context)
     return submitted, correlated
 
@@ -237,13 +346,28 @@ def request_timeline(command, row, context, drain_until):
 def validate_load_run(run, scenario):
     run_id = identity(run["run_id"], "workload run_id")
     identity(run["build_id"], run_id)
-    require(run["trace_id"] == trace_id(scenario), run_id, "trace ID does not identify the supplied inputs")
+    require(
+        run["trace_id"] == trace_id(scenario),
+        run_id,
+        "trace ID does not identify the supplied inputs",
+    )
     require(run["market_data_enabled"] is True, run_id, "market data was disabled")
     drain_until = nonnegative(run["drain_until_ns"], run_id)
     commands = scenario["commands"]
     rows = run["requests"]
-    require(len(commands) == len(rows), run_id, "each planned command needs a request record")
-    counts = dict(planned=len(commands), attempted=0, submitted=0, completed=0, rejected=0, incomplete=0)
+    require(
+        len(commands) == len(rows),
+        run_id,
+        "each planned command needs a request record",
+    )
+    counts = {
+        "planned": len(commands),
+        "attempted": 0,
+        "submitted": 0,
+        "completed": 0,
+        "rejected": 0,
+        "incomplete": 0,
+    }
     activities = Counter()
     by_operation = defaultdict(list)
     for command, row in zip(commands, rows, strict=True):
@@ -266,12 +390,25 @@ def validate_load_run(run, scenario):
     for event in sorted(activities):
         outstanding += activities[event]
         peak = max(peak, outstanding)
-    require(counts == run["counts"], run_id, f"reported counts differ from measured counts {counts}")
-    require(run["peak_outstanding"] == peak, run_id, f"reported outstanding peak differs from {peak}")
-    require(run["backlog_drained"] is (outstanding == 0), run_id, "reported backlog drain differs")
+    require(
+        counts == run["counts"],
+        run_id,
+        f"reported counts differ from measured counts {counts}",
+    )
+    require(
+        run["peak_outstanding"] == peak,
+        run_id,
+        f"reported outstanding peak differs from {peak}",
+    )
+    require(
+        run["backlog_drained"] is (outstanding == 0),
+        run_id,
+        "reported backlog drain differs",
+    )
     latency = {
         f"{phase}/{operation}": {
-            "sample_count": len(samples), "median_ns": median(samples) if samples else None,
+            "sample_count": len(samples),
+            "median_ns": median(samples) if samples else None,
         }
         for (phase, operation), samples in sorted(by_operation.items())
     }
@@ -290,12 +427,27 @@ def validate_workloads(trace, regenerated, report):
         observed_scenarios.add(name)
         if comparison := run.get("comparison_id"):
             validate_counts(run["output_counts"], run_id)
-            outcomes = [(row["id"], row.get("submitted_ns") is not None, row.get("outcome"))
-                        for row in run["requests"]]
-            work = (run["trace_id"], outcomes, run["ordered_fills"], run["output_counts"])
+            outcomes = [
+                (row["id"], row.get("submitted_ns") is not None, row.get("outcome"))
+                for row in run["requests"]
+            ]
+            work = (
+                run["trace_id"],
+                outcomes,
+                run["ordered_fills"],
+                run["output_counts"],
+            )
             previous = comparisons.setdefault((name, comparison), work)
-            require(previous == work, run_id, "compared variants processed different inputs or ordered work")
-    require(observed_scenarios == set(SCENARIOS), "paced load", "need a run for each scenario")
+            require(
+                previous == work,
+                run_id,
+                "compared variants processed different inputs or ordered work",
+            )
+    require(
+        observed_scenarios == set(SCENARIOS),
+        "paced load",
+        "need a run for each scenario",
+    )
     return {"traces": traces, "runs": summaries}
 
 
@@ -305,22 +457,44 @@ def validate_cache_observations(report, builds):
         if observation["status"] == "unavailable":
             identity(observation["reason"], "cache observation reason")
             continue
-        require(observation["status"] == "recorded", "cache observation", "unknown status")
-        for field in ("method", "event", "filter", "instruction_map", "raw_measurements"):
+        require(
+            observation["status"] == "recorded", "cache observation", "unknown status"
+        )
+        for field in (
+            "method",
+            "event",
+            "filter",
+            "instruction_map",
+            "raw_measurements",
+        ):
             identity(observation[field], f"cache observation {field}")
         run_id = identity(observation["run_id"], "cache observation run ID")
-        require(run_id not in builds and run_id not in recorded, run_id, "sampling must have a distinct run ID")
+        require(
+            run_id not in builds and run_id not in recorded,
+            run_id,
+            "sampling must have a distinct run ID",
+        )
         recorded.add(run_id)
         build_id = identity(observation["build_id"], run_id)
-        require(builds.get(observation["timing_run_id"]) == build_id,
-                run_id, "sampling must name its matching timing run and exact build")
+        require(
+            builds.get(observation["timing_run_id"]) == build_id,
+            run_id,
+            "sampling must name its matching timing run and exact build",
+        )
         denominator = positive(observation["denominator"], run_id)
         validate_counts(observation["cache_source_counts"], run_id)
         samples = nonnegative(observation["sample_count"], run_id)
-        require(sum(observation["cache_source_counts"].values()) == denominator <= samples,
-                run_id, "cache-source counts or denominator disagree")
+        require(
+            sum(observation["cache_source_counts"].values()) == denominator <= samples,
+            run_id,
+            "cache-source counts or denominator disagree",
+        )
         nonnegative(observation["lost_samples"], run_id)
-    require(recorded or not report.get("cache_source_claims"), "cache observation", "claims require recorded evidence")
+    require(
+        recorded or not report.get("cache_source_claims"),
+        "cache observation",
+        "claims require recorded evidence",
+    )
 
 
 def validate_matcher(report):
@@ -329,9 +503,17 @@ def validate_matcher(report):
     for field in ("start", "stop", "fill_recording"):
         identity(timing[field], f"matcher timing {field}")
     for field in ("event_preparation_included", "notice_preparation_included"):
-        require(type(timing[field]) is bool, "matcher timing", f"state whether {field} was included")
+        require(
+            type(timing[field]) is bool,
+            "matcher timing",
+            f"state whether {field} was included",
+        )
     nonnegative(timing["overhead_ns"], "matcher timer overhead")
-    require(TIMING_EXCLUSIONS <= set(timing["exclusions"]), "matcher timing", "network or other excluded work included")
+    require(
+        TIMING_EXCLUSIONS <= set(timing["exclusions"]),
+        "matcher timing",
+        "network or other excluded work included",
+    )
     require(report["pairs"], "matcher timing", "no measured pairs")
     pair_orders = defaultdict(list)
     builds = {}
@@ -341,16 +523,31 @@ def validate_matcher(report):
         footprint = positive(pair["working_set_bytes"], "touched footprint")
         case_id = identity(pair["case_id"], "matcher case ID")
         phase = pair["phase"]
-        require(phase in ("exploration", "confirmation"), case_id, "unknown experiment phase")
+        require(
+            phase in ("exploration", "confirmation"),
+            case_id,
+            "unknown experiment phase",
+        )
         require(len(pair["runs"]) == 2, case_id, "each pair must contain two runs")
         left, right = pair["runs"]
-        require(left["work"] == right["work"], case_id, "ordered fills or per-operation work differ")
+        require(
+            left["work"] == right["work"],
+            case_id,
+            "ordered fills or per-operation work differ",
+        )
         work = left["work"]
         validate_counts(work["operation_counts"], f"{case_id} operations")
         validate_counts(work["output_counts"], f"{case_id} outputs")
-        require(isinstance(work["ordered_fills"], list), case_id, "missing ordered fill record")
-        require(nonnegative(work["fill_count"], case_id) == len(work["ordered_fills"]),
-                case_id, "ordered fill count differs from observed fills")
+        require(
+            isinstance(work["ordered_fills"], list),
+            case_id,
+            "missing ordered fill record",
+        )
+        require(
+            nonnegative(work["fill_count"], case_id) == len(work["ordered_fills"]),
+            case_id,
+            "ordered fill count differs from observed fills",
+        )
         nonnegative(work["maker_visits"], case_id)
         nonnegative(work["price_visits"], case_id)
         order = tuple(identity(run["variant"], case_id) for run in pair["runs"])
@@ -361,22 +558,45 @@ def validate_matcher(report):
             run_id = identity(run["run_id"], "matcher run ID")
             require(run_id not in builds, run_id, "duplicate matcher run ID")
             builds[run_id] = identity(run["build_id"], run_id)
-            require(run["trace_id"] == trace, run_id, "run trace ID differs from paired trace")
-            require(run["timing_only"] is True, run_id, "timing must be separate from heavy observation")
+            require(
+                run["trace_id"] == trace,
+                run_id,
+                "run trace ID differs from paired trace",
+            )
+            require(
+                run["timing_only"] is True,
+                run_id,
+                "timing must be separate from heavy observation",
+            )
             samples = run["samples_ns"]
-            require(samples and run["sample_count"] == len(samples), run_id, "sample count mismatch")
+            require(
+                samples and run["sample_count"] == len(samples),
+                run_id,
+                "sample count mismatch",
+            )
             for sample in samples:
                 nonnegative(sample, run_id)
             medians[run["variant"]] = median(samples)
         variants = sorted(medians)
-        results.append({
-            "case_id": case_id, "working_set_bytes": footprint, "run_order": order, "median_ns": medians,
-            "difference_order": variants, "paired_difference_ns": medians[variants[1]] - medians[variants[0]],
-            "operations": work["operation_counts"],
-            "maker_visits": work["maker_visits"], "price_visits": work["price_visits"],
-        })
+        results.append(
+            {
+                "case_id": case_id,
+                "working_set_bytes": footprint,
+                "run_order": order,
+                "median_ns": medians,
+                "difference_order": variants,
+                "paired_difference_ns": medians[variants[1]] - medians[variants[0]],
+                "operations": work["operation_counts"],
+                "maker_visits": work["maker_visits"],
+                "price_visits": work["price_visits"],
+            }
+        )
     for (case_id, *_), orders in pair_orders.items():
-        require(len(orders) == 1 or len(set(orders)) == 2, case_id, "repeated pairs did not rotate run order")
+        require(
+            len(orders) == 1 or len(set(orders)) == 2,
+            case_id,
+            "repeated pairs did not rotate run order",
+        )
     validate_cache_observations(report, builds)
     return {"pairs": results}
 
@@ -386,7 +606,7 @@ def read_json(path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     subparsers = parser.add_subparsers(dest="kind", required=True)
     workload = subparsers.add_parser("workload")
     workload.add_argument("--trace", type=Path, required=True)
@@ -398,7 +618,9 @@ def main():
     try:
         report = read_json(args.runs)
         if args.kind == "workload":
-            result = validate_workloads(read_json(args.trace), read_json(args.regenerated), report)
+            result = validate_workloads(
+                read_json(args.trace), read_json(args.regenerated), report
+            )
         else:
             result = validate_matcher(report)
     except (OSError, ValueError, TypeError, KeyError) as error:

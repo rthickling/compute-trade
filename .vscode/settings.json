@@ -1,7 +1,5 @@
 {
-  "C_Cpp.default.compileCommands": [
-    "${workspaceFolder}/build/debug/compile_commands.json"
-  ],
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/build/debug/compile_commands.json",
   "C_Cpp.default.browse.path": [
     "${workspaceFolder}/include",
     "${workspaceFolder}/src",
@@ -12,5 +10,21 @@
   "clangd.arguments": [
     "--compile-commands-dir=${workspaceFolder}/build/debug",
     "--query-driver=/usr/bin/g++-16,/usr/bin/g++"
-  ]
+  ],
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/tests"
+  ],
+  "C_Cpp.default.includePath": [
+    "${workspaceFolder}/include",
+    "${workspaceFolder}/../simplx/include",
+    "${workspaceFolder}/../simplx"
+  ],
+  "C_Cpp.intelliSenseEngine": "disabled",
+  "python.defaultInterpreterPath": "/home/richard/.pyenv/versions/3.14.3/envs/test-python/bin/python",
+  "yaml.schemas": {
+    "": [
+      ".clangd",
+      "**/.clangd"
+    ]
+  }
 }

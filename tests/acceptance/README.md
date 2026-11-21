@@ -17,14 +17,16 @@ root, use a C++26-capable compiler and Python 3.10 or newer.
 CXX=g++-16 cmake --preset debug
 cmake --build --preset debug --parallel
 ctest --preset debug
-CXX=g++-16 cmake --preset sanitizers
+CXX=g++-16 cmake --preset sanitizers -DSIMPLX_SOURCE_DIR=/path/to/fixed/simplx \
+  -DCOMPUTE_TRADE_ACCEPTANCE_LIVE=ON
 cmake --build --preset sanitizers --parallel
 ctest --preset sanitizers
 ```
 
 The sanitizer preset instruments Compute Trade and the pinned Simplx build with
 AddressSanitizer and UndefinedBehaviorSanitizer. It keeps checks separate from
-release timing. On the pinned baseline, GCC's UndefinedBehaviorSanitizer
+release timing. Use the verified alignment-fixed Simplx revision in the
+root README for this build. On the original pinned baseline, GCC's UndefinedBehaviorSanitizer
 reports a misaligned `Event::Chain` construction during Simplx startup
 (`include/trz/engine/actor.h:2274`, called from `src/engine/node.cpp:272`).
 Verbose CTest output with `UBSAN_OPTIONS=print_stacktrace=1` preserves the
@@ -33,11 +35,9 @@ TCP exchange starts on the local machine and gets a four-second I/O deadline
 per operation. The harness sends SIGTERM on exit and reports any abnormal
 shutdown alongside the exchange output.
 
-The live specification suite is opt-in during staged implementation. It returns
-a failure when a launch interface or tested feature is missing. A checkout
-without the new application configuration will fail before reaching the
-scenarios. A passing framework self-test establishes that the oracle or
-evidence checker behaved as tested.
+The live specification suite is enabled by the acceptance preset and exercises
+the exchange with real sockets. The framework self-tests check the independent
+oracles and evidence validators with fixed fixtures.
 
 ```sh
 CXX=g++-16 cmake --preset acceptance

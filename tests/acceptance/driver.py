@@ -1,17 +1,17 @@
 """Process, TCP session, subscriber, and test control clients."""
 
-from collections import deque
-from contextlib import contextmanager
 import json
-from pathlib import Path
-from queue import Empty, Queue
 import select
 import socket
 import struct
 import subprocess
+import time
+from collections import deque
+from contextlib import contextmanager
+from pathlib import Path
+from queue import Empty, Queue
 from tempfile import TemporaryDirectory
 from threading import Thread
-import time
 
 from . import extensions, wire
 
@@ -38,7 +38,7 @@ def read_json(stream):
         raise ValueError("missing or oversized JSON line")
     result = json.loads(line)
     if not isinstance(result, dict):
-        raise ValueError(f"expected a JSON object, got {result!r}")
+        raise TypeError(f"expected a JSON object, got {result!r}")
     return result
 
 
@@ -121,8 +121,10 @@ class Session:
     def accept_logon(self):
         if self.logon_ack is None:
             self.logon_ack = self.expect(wire.LOGON_ACK)
+            last_client_sequence = self.logon_ack.fields["last_client_sequence"]
+            assert isinstance(last_client_sequence, int)
             self.next_request_sequence = max(
-                self.next_request_sequence, self.logon_ack.fields["last_client_sequence"] + 1
+                self.next_request_sequence, last_client_sequence + 1
             )
         return self.logon_ack
 
@@ -214,6 +216,7 @@ class Exchange:
         self.ports = ports
         self.control_path = control_path
         self.connections = []
+        self.injector: Path | None = None
 
     def raw_connection(self):
         sock = socket.create_connection((HOST, int(self.ports["port"])), timeout=TIMEOUT)
@@ -258,7 +261,7 @@ class Exchange:
 
 
 @contextmanager
-def launch(executable, limits=None):
+def launch(executable, limits=None, *, session_fixtures=None, env=None):
     with TemporaryDirectory(prefix="ct-acceptance-") as raw_directory:
         directory = Path(raw_directory)
         config = directory / "exchange.json"
@@ -267,7 +270,9 @@ def launch(executable, limits=None):
             "instruments": [1, 2],
             "sessions": [
                 {"logical_access_id": access, "partition_id": partition, "firms": firms}
-                for (access, partition), firms in SESSION_FIXTURES.items()
+                for (access, partition), firms in (
+                    SESSION_FIXTURES if session_fixtures is None else session_fixtures
+                ).items()
             ],
             "limits": limits or {},
         }))
@@ -276,13 +281,15 @@ def launch(executable, limits=None):
             "--market-port", "0", "--acceptance-control", str(control),
         ]
         process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   text=True, encoding="utf-8", errors="replace")
+                                   text=True, encoding="utf-8", errors="replace", env=env)
         readiness = Queue()
         lines = deque(maxlen=40)
 
         def capture():
-            with process.stdout:
-                for line in process.stdout:
+            stdout = process.stdout
+            assert stdout is not None
+            with stdout:
+                for line in stdout:
                     lines.append(line.rstrip())
                     if line.startswith("READY "):
                         readiness.put(line)
@@ -309,18 +316,18 @@ def launch(executable, limits=None):
             error.add_note("ct_exchange output (last 40 lines):\n" + "\n".join(lines))
             raise
         finally:
-            if exchange is not None:
-                exchange.close()
             if process.poll() is None:
                 process.terminate()
             try:
                 result = process.wait(timeout=TIMEOUT)
             except subprocess.TimeoutExpired:
                 process.kill()
-                process.wait()
+                result = process.wait()
                 if not failed:
                     raise AssertionError("exchange did not stop after SIGTERM") from None
             finally:
+                if exchange is not None:
+                    exchange.close()
                 output.join(timeout=TIMEOUT)
             if not failed and result != 0:
                 raise AssertionError(f"exchange exited with status {result}:\n" + "\n".join(lines))

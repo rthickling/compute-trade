@@ -15,6 +15,11 @@ class ReferenceTests(unittest.TestCase):
     def enter(self, side, price, quantity, session="A", firm="firm1", instrument=1):
         return self.exchange.new_order(session, firm, instrument, side, price, quantity)
 
+    @staticmethod
+    def require_order(result):
+        assert result.order is not None, result
+        return result.order
+
     def test_price_then_fifo_across_multiple_makers(self):
         self.enter(SELL, 102, 1)  # order 1, oldest but not the best price
         self.enter(SELL, 101, 3)
@@ -37,13 +42,13 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual([(1, 1), (3, 4)], [(o.id, o.remaining) for o in self.exchange.book()])
 
     def test_partial_execution_reduces_only_open_quantity_and_preserves_priority(self):
-        first = self.enter(SELL, 100, 10).order
+        first = self.require_order(self.enter(SELL, 100, 10))
         self.enter(SELL, 100, 10)
         self.enter(BUY, 100, 4)
 
-        amend = self.exchange.amend("B", "firm1", 1, SELL, first.id, 100, 8)
-        self.assertEqual((amend.order.id, amend.order.remaining, amend.order.executed), (1, 4, 4))
-        self.assertEqual(amend.order.priority, first.priority)
+        amend = self.require_order(self.exchange.amend("B", "firm1", 1, SELL, first.id, 100, 8))
+        self.assertEqual((amend.id, amend.remaining, amend.executed), (1, 4, 4))
+        self.assertEqual(amend.priority, first.priority)
         before = self.exchange.book()
         for total in (4, 3):
             result = self.exchange.amend("B", "firm1", 1, SELL, first.id, 100, total)
@@ -55,8 +60,8 @@ class ReferenceTests(unittest.TestCase):
     def test_price_change_and_size_increase_lose_priority(self):
         self.enter(SELL, 101, 1)
         self.enter(SELL, 100, 1)
-        amend = self.exchange.amend("A", "firm1", 1, SELL, 1, 100, 1)
-        self.assertEqual(amend.order.id, 1)
+        amend = self.require_order(self.exchange.amend("A", "firm1", 1, SELL, 1, 100, 1))
+        self.assertEqual(amend.id, 1)
         self.assertEqual([order.id for order in self.exchange.book()], [2, 1])
 
         self.exchange.amend("A", "firm1", 1, SELL, 2, 100, 2)
@@ -70,7 +75,8 @@ class ReferenceTests(unittest.TestCase):
 
         result = self.exchange.amend("A", "firm1", 1, SELL, 1, 100, 6)
         self.assertEqual(result.fills, (Fill(3, 1, 100, 3),))
-        self.assertEqual((result.order.id, result.order.executed, result.order.remaining), (1, 5, 1))
+        order = self.require_order(result)
+        self.assertEqual((order.id, order.executed, order.remaining), (1, 5, 1))
 
     def test_firm_can_change_orders_through_another_authorised_session(self):
         self.enter(BUY, 100, 2)
@@ -81,8 +87,8 @@ class ReferenceTests(unittest.TestCase):
         wrong_side = self.exchange.amend("B", "firm1", 1, SELL, 1, 100, 1)
         self.assertEqual(wrong_side.error, "incompatible_order")
 
-        cancelled = self.exchange.cancel("B", "firm1", 1, BUY, 1)
-        self.assertEqual(cancelled.order.id, 1)
+        cancelled = self.require_order(self.exchange.cancel("B", "firm1", 1, BUY, 1))
+        self.assertEqual(cancelled.id, 1)
         stale = self.exchange.cancel("B", "firm1", 1, BUY, 1)
         self.assertEqual(stale.error, "unknown_order")
         self.assertEqual(self.exchange.book(), ())
@@ -103,10 +109,10 @@ class ReferenceTests(unittest.TestCase):
 class Level3Tests(unittest.TestCase):
     @staticmethod
     def update(sequence, action="add", order_id=10, remaining=3, priority=1):
-        return dict(
-            sequence=sequence, action=action, order_id=order_id, instrument=1, side=SELL,
-            price=100, remaining=remaining, priority=priority,
-        )
+        return {
+            "sequence": sequence, "action": action, "order_id": order_id, "instrument": 1, "side": SELL,
+            "price": 100, "remaining": remaining, "priority": priority,
+        }
 
     def test_reconstructs_priority_quantity_and_removal(self):
         book = Level3View()

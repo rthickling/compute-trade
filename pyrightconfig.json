@@ -1,0 +1,4 @@
+{
+  "extraPaths": ["tests"],
+  "reportMissingImports": true
+}

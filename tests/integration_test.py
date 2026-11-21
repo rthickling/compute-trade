@@ -135,6 +135,8 @@ class Exchange:
             stdout=subprocess.PIPE,
             stderr=self.errors,
         )
+        stdout = self.process.stdout
+        assert stdout is not None
         try:
             deadline = time.monotonic() + TIMEOUT
             buffered = b""
@@ -144,9 +146,9 @@ class Exchange:
                 check(
                     remaining > 0, "exchange did not become ready within five seconds"
                 )
-                readable, _, _ = select.select([self.process.stdout], [], [], remaining)
+                readable, _, _ = select.select([stdout], [], [], remaining)
                 check(readable, "timed out waiting for exchange READY line")
-                chunk = os.read(self.process.stdout.fileno(), 4096)
+                chunk = os.read(stdout.fileno(), 4096)
                 check(chunk, "exchange exited before READY: " + self.diagnostics())
                 buffered += chunk
                 while b"\n" in buffered:
@@ -198,7 +200,8 @@ class Exchange:
                     f"exchange shutdown exit code {code}: {self.diagnostics()}",
                 )
         finally:
-            self.process.stdout.close()
+            if self.process.stdout is not None:
+                self.process.stdout.close()
             self.errors.close()
             self.process = None
 
@@ -206,6 +209,7 @@ class Exchange:
         self.stop(require_success=error_type is None)
 
     def connect(self):
+        assert self.port is not None
         connection = socket.create_connection(("127.0.0.1", self.port), timeout=TIMEOUT)
         connection.settimeout(TIMEOUT)
         connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
