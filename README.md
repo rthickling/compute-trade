@@ -35,7 +35,7 @@ cache-performance experiments come later.
 ## Build and test
 
 Requirements: Linux, CMake 3.28 or newer, Ninja, a C++26 compiler such as
-`g++-16`, and Python 3 for the integration tests. `just` is optional. The local
+`g++-16`, and Python 3.10 or newer for the tests. `just` is optional. The local
 compiler used for development is GCC 16.0.1.
 
 The default dependency path is `../simplx`. From the Compute Trade repository
@@ -178,6 +178,10 @@ starts the real exchange and injector. The Python tests independently construct
 and decode wire bytes, and check same-CPU startup, matching, instrument/session
 separation, rejection paths, fragmented/coalesced TCP frames, pipelining,
 half-close, abandoned replies, and command-line validation.
+
+See the [acceptance test guide](tests/acceptance/README.md) for the independent
+wire fixtures, reference matcher, live acceptance suite, sanitizer preset and
+run-evidence checks. Framework self-tests run in the standard CTest suite.
 
 See [the architecture notes](docs/architecture.md) for actor responsibilities,
 allocation, protocol details, and current limits. The main entry points are:

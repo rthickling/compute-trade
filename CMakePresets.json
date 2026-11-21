@@ -28,6 +28,20 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
+    },
+    {
+      "name": "acceptance",
+      "inherits": "debug",
+      "cacheVariables": {
+        "COMPUTE_TRADE_ACCEPTANCE_LIVE": "ON"
+      }
+    },
+    {
+      "name": "sanitizers",
+      "inherits": "debug",
+      "cacheVariables": {
+        "COMPUTE_TRADE_SANITIZERS": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -38,6 +52,14 @@
     {
       "name": "release",
       "configurePreset": "release"
+    },
+    {
+      "name": "acceptance",
+      "configurePreset": "acceptance"
+    },
+    {
+      "name": "sanitizers",
+      "configurePreset": "sanitizers"
     }
   ],
   "testPresets": [
@@ -60,6 +82,21 @@
       "execution": {
         "noTestsAction": "error"
       }
+    },
+    {
+      "name": "acceptance",
+      "inherits": "debug",
+      "configurePreset": "acceptance",
+      "filter": {
+        "include": {
+          "label": "^acceptance$"
+        }
+      }
+    },
+    {
+      "name": "sanitizers",
+      "inherits": "debug",
+      "configurePreset": "sanitizers"
     }
   ]
 }

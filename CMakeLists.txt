@@ -30,6 +30,13 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 include(CTest)
+option(COMPUTE_TRADE_ACCEPTANCE_LIVE "Register live exchange acceptance tests" OFF)
+option(COMPUTE_TRADE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+if(COMPUTE_TRADE_SANITIZERS)
+    add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=all
+        -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined -fno-sanitize-recover=all)
+endif()
 set(SIMPLX_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../simplx" CACHE PATH
     "Path to the rthickling/simplx checkout (tested at c0b2ca712f1c187b6c120d5bcaf441bdff1600ae)")
 if(NOT EXISTS "${SIMPLX_SOURCE_DIR}/include/simplx.h" OR NOT EXISTS "${SIMPLX_SOURCE_DIR}/CMakeLists.txt")
@@ -61,9 +68,25 @@ if(BUILD_TESTING)
         target_link_libraries(${test}_test PRIVATE compute_trade_headers)
         add_test(NAME ${test} COMMAND ${test}_test)
     endforeach()
-    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
     add_test(NAME exchange_integration COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration_test.py"
         "$<TARGET_FILE:ct_exchange>" "$<TARGET_FILE:ct_injector>")
     set_tests_properties(exchange_integration PROPERTIES TIMEOUT 60)
+    add_test(NAME acceptance_framework COMMAND "${Python3_EXECUTABLE}"
+        -m unittest discover -s acceptance -t . -v)
+    set_tests_properties(acceptance_framework PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests"
+        LABELS framework TIMEOUT 30)
+
+    if(COMPUTE_TRADE_ACCEPTANCE_LIVE)
+        foreach(group IN ITEMS book flow transport)
+            add_test(NAME acceptance_${group} COMMAND "${Python3_EXECUTABLE}"
+                -m acceptance.runner --group "${group}" --exchange "$<TARGET_FILE:ct_exchange>"
+                --injector "$<TARGET_FILE:ct_injector>")
+            set_tests_properties(acceptance_${group} PROPERTIES
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests"
+                LABELS acceptance RUN_SERIAL TRUE TIMEOUT 120)
+        endforeach()
+    endif()
 endif()
