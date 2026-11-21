@@ -33,9 +33,10 @@ class SessionControlTest(unittest.TestCase):
     def test_control_json_requires_objects_and_terminator(self):
         payload = io.BytesIO(b'{"status":"ok"}\n')
         check_fields(read_json(payload), {"status": "ok"})
-        for value in [b"[]\n", b'{"ok":true}']:
-            with self.subTest(value=value), self.assertRaises(ValueError):
-                read_json(io.BytesIO(value))
+        with self.subTest(value=b"[]\n"), self.assertRaises(TypeError):
+            read_json(io.BytesIO(b"[]\n"))
+        with self.subTest(value=b'{"ok":true}'), self.assertRaises(ValueError):
+            read_json(io.BytesIO(b'{"ok":true}'))
         with self.assertRaisesRegex(AssertionError, "absent"):
             check_fields({}, {"absent": None})
 
