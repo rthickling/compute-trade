@@ -44,8 +44,12 @@ redzone-exchange matcher="" publisher="" blue="" config="config/local.json" mode
     rm -f "$control"
     echo "layout matcher=$matcher_cpu publisher=$publisher_cpu blue=$blue_cpu" >&2
     echo "control socket: $control" >&2
+    # isolcpus removes reserved CPUs from the default affinity mask; taskset them back in
+    # so validate_core / Simplx can place matcher and publisher threads.
+    cpus="$matcher_cpu,$publisher_cpu,$blue_cpu"
     exec sudo systemd-run --wait --pipe --collect --uid="$(id -u)" --gid="$(id -g)" \
         -p LimitRTPRIO=10 --working-directory="$PWD" \
+        taskset -c "$cpus" \
         "$PWD/build/{{ mode }}/bin/ct_exchange" --config "$PWD/{{ config }}" \
         --bind 127.0.0.1 --port "{{ port }}" --market-port "{{ market_port }}" \
         --core "$matcher_cpu" --publisher-core "$publisher_cpu" \
@@ -70,7 +74,9 @@ redzone-subscribe housekeeping="" port="9001":
     taskset -c "$hk" python3 tools/market_subscriber.py --port "{{ port }}" --quiet &
     echo $! | tee build/redzone/subscriber.pid
 
-redzone-placement matcher="" publisher="" blue="" control="build/redzone/control.sock":
+# residual: comma-separated IRQ numbers, or set REDZONE_RESIDUAL.
+# Example: REDZONE_RESIDUAL=82,84 just redzone-placement
+redzone-placement matcher="" publisher="" blue="" control="build/redzone/control.sock" residual="":
     #!/usr/bin/env bash
     set -euo pipefail
     args=()
@@ -79,12 +85,30 @@ redzone-placement matcher="" publisher="" blue="" control="build/redzone/control
     [[ -n "{{ blue }}" ]] && args+=(--blue "{{ blue }}")
     eval "$(python3 tools/redzone_layout.py --export "${args[@]}")"
     sub_args=()
-    if [[ -f build/redzone/subscriber.pid ]]; then
-        sub_args+=(--subscriber-pid "$(cat build/redzone/subscriber.pid)")
+    for role in subscriber client; do
+        pid_file="build/redzone/${role}.pid"
+        [[ -f "$pid_file" ]] || continue
+        pid="$(tr -d '[:space:]' < "$pid_file")"
+        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+        kill -0 "$pid" 2>/dev/null || continue
+        sub_args+=(--"${role}-pid" "$pid")
+    done
+    residual_spec="{{ residual }}"
+    if [[ -z "$residual_spec" ]]; then
+        residual_spec="${REDZONE_RESIDUAL:-}"
+    fi
+    residual_args=()
+    if [[ -n "$residual_spec" ]]; then
+        IFS=',' read -r -a irq_list <<< "$residual_spec"
+        for irq in "${irq_list[@]}"; do
+            irq="${irq// /}"
+            [[ -n "$irq" ]] && residual_args+=(--residual-irq "$irq")
+        done
     fi
     python3 tools/redzone_status.py --strict --matcher "$matcher_cpu" \
         --publisher "$publisher_cpu" --blue "$blue_cpu" \
-        --control "{{ control }}" "${sub_args[@]}" | tee build/redzone/placement.json
+        --control "{{ control }}" "${sub_args[@]}" "${residual_args[@]}" \
+        | tee build/redzone/placement.json
 
 # Stop RedZone processes; reboot separately to clear nosmt/isolcpus.
 redzone-stop:

@@ -123,8 +123,10 @@ eval "$(python3 tools/redzone_layout.py --export)"
 control="$PWD/build/redzone/control.sock"
 mkdir -p build/redzone
 rm -f "$control"
+# isolcpus excludes reserved CPUs from the default affinity; taskset them in first.
 sudo systemd-run --wait --pipe --collect --uid="$(id -u)" --gid="$(id -g)" \
   -p LimitRTPRIO=10 --working-directory="$PWD" \
+  taskset -c "$matcher_cpu,$publisher_cpu,$blue_cpu" \
   "$PWD/build/release/bin/ct_exchange" --config "$PWD/config/local.json" \
     --bind 127.0.0.1 --port 9000 --market-port 9001 \
     --core "$matcher_cpu" --publisher-core "$publisher_cpu" \

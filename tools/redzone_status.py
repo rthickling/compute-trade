@@ -163,7 +163,13 @@ def report(args):
                 or worker["affinity"] != [args.blue]
             ):
                 potential.append(f"{role} is not pinned to its BlueZone CPU")
-        for role in ("test_client", "subscriber"):
+        # Only validate housekeepers that were explicitly sampled.
+        for role, requested in (
+            ("test_client", args.client_pid),
+            ("subscriber", args.subscriber_pid),
+        ):
+            if requested is None:
+                continue
             worker = jobs.get(role)
             if (
                 worker is None
