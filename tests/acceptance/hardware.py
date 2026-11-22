@@ -8,6 +8,9 @@ import sys
 from pathlib import Path
 
 
+BLUE_RESPONSIBILITIES = ("statistics", "disconnect_replay")
+
+
 def cpu_set(value):
     cpus = set()
     for segment in filter(None, value.strip().split(",")):
@@ -35,6 +38,8 @@ def capture(placement):
             "priority": os.sched_getparam(tid).sched_priority,
         })
     return {
+        **{key: placement[key] for key in ("process_id", "engine_startup_thread_id")
+           if key in placement},
         "online": sorted(online),
         "isolated": sorted(isolated),
         "nohz_full": sorted(nohz),
@@ -118,7 +123,18 @@ def validate(manifest, events):
         require(worker["scheduler"] in (os.SCHED_FIFO, os.SCHED_RR) and worker["priority"] > 0,
                 f"CPU {cpu} worker is missing real-time scheduling")
 
-    for role in ("statistics", "disconnect_replay", "test_client", "subscriber"):
+    blue_roles = BLUE_RESPONSIBILITIES
+    if "bluezone" in by_role:
+        responsibilities = by_role["bluezone"].get("responsibilities")
+        require(isinstance(responsibilities, list)
+                and len(responsibilities) == len(BLUE_RESPONSIBILITIES)
+                and all(role in responsibilities and role not in by_role for role in BLUE_RESPONSIBILITIES),
+                "invalid BlueZone responsibilities")
+        require(len({worker["thread_id"] for worker in (*redzone, by_role["bluezone"])}) == 3,
+                "duplicate exchange thread IDs")
+        blue_roles = ("bluezone",)
+
+    for role in (*blue_roles, "test_client", "subscriber"):
         worker = by_role[role]
         require(bool(worker["affinity"]) and worker["cpu"] in worker["affinity"],
                 f"{role} is missing observed or effective placement")

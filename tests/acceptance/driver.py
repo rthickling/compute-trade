@@ -261,7 +261,7 @@ class Exchange:
 
 
 @contextmanager
-def launch(executable, limits=None, *, session_fixtures=None, env=None):
+def launch(executable, limits=None, *, session_fixtures=None, env=None, placement_file=None):
     with TemporaryDirectory(prefix="ct-acceptance-") as raw_directory:
         directory = Path(raw_directory)
         config = directory / "exchange.json"
@@ -278,8 +278,12 @@ def launch(executable, limits=None, *, session_fixtures=None, env=None):
         }))
         args = [
             str(executable), "--bind", HOST, "--port", "0", "--config", str(config),
-            "--market-port", "0", "--acceptance-control", str(control),
+            "--market-port", "0",
         ]
+        if placement_file is None:
+            args.extend(["--acceptance-control", str(control)])
+        else:
+            args.extend(["--placement-file", str(placement_file)])
         process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                    text=True, encoding="utf-8", errors="replace", env=env)
         readiness = Queue()

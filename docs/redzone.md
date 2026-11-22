@@ -14,6 +14,13 @@ Inspect the host with `lscpu -e=CPU,CORE,SOCKET,ONLINE`. Use logical CPU
 numbers everywhere. The exchange checks that RedZone workers sit on different
 physical cores (including socket identity).
 
+`isolcpus=domain` keeps CPUs out of load balancing. A process launched on
+housekeeping CPUs can still explicitly pin its workers to isolated CPUs
+that are online and available in its effective cgroup cpuset. The exchange
+requests that placement itself. When RedZone CPUs are omitted on the
+exchange command line, it looks for isolated online candidates and checks
+their effective affinity at startup. [Linux CPU isolation guide](https://docs.kernel.org/admin-guide/cpu-isolation.html#scheduler-domain-isolation)
+
 `tools/redzone_layout.py` picks defaults for any machine:
 
 1. If the kernel already isolates exactly two CPUs, use those.
@@ -43,7 +50,7 @@ the root justfile. From the repository root:
 | `just redzone-preflight` | Write layout + status under `build/redzone/` |
 | `just redzone-exchange` | Build release and launch with `--redzone` |
 | `just redzone-subscribe` | Pin the market subscriber to housekeeping |
-| `just redzone-placement` | Strict placement check against the control socket |
+| `just redzone-placement` | Verify the running exchange against its startup placement file |
 | `just redzone-stop` | Stop exchange/subscriber; restore saved IRQ/workqueue files |
 | `just redzone-reboot` | `redzone-stop`, then reboot to the default GRUB entry |
 
@@ -120,18 +127,25 @@ Prefer the just recipes above. The equivalent manual launch is:
 
 ```sh
 eval "$(python3 tools/redzone_layout.py --export)"
-control="$PWD/build/redzone/control.sock"
+workers="$PWD/build/redzone/workers.json"
 mkdir -p build/redzone
-rm -f "$control"
-# isolcpus excludes reserved CPUs from the default affinity; taskset them in first.
+rm -f "$workers"
 sudo systemd-run --wait --pipe --collect --uid="$(id -u)" --gid="$(id -g)" \
   -p LimitRTPRIO=10 --working-directory="$PWD" \
-  taskset -c "$matcher_cpu,$publisher_cpu,$blue_cpu" \
   "$PWD/build/release/bin/ct_exchange" --config "$PWD/config/local.json" \
     --bind 127.0.0.1 --port 9000 --market-port 9001 \
     --core "$matcher_cpu" --publisher-core "$publisher_cpu" \
-    --blue-core "$blue_cpu" --redzone --acceptance-control "$control"
+    --blue-core "$blue_cpu" --redzone --placement-file "$workers"
 ```
+
+The exchange pins the supervisor to BlueZone before starting Simplx. A
+short-lived thread constructs the engine and exits before `READY`. Simplx
+temporarily pins that thread to each worker CPU for allocation and actor
+initialization. The supervisor writes its own process ID, the startup
+thread ID and the three worker placements after the startup thread's
+`/proc` task entry disappears and before `READY`. RedZone startup
+rejects `--acceptance-control`. Use ordinary scheduling for tests that need
+snapshots, gates or command traces.
 
 Start the market-data subscriber on housekeeping CPUs and wait for its
 ready message before sending the first order. A stream is qualified to
@@ -154,15 +168,21 @@ once per recorded unavoidable IRQ if applicable.
 just redzone-placement
 # or:
 python3 tools/redzone_status.py --strict --matcher "$matcher_cpu" \
-  --publisher "$publisher_cpu" --blue "$blue_cpu" --control "$control" \
+  --publisher "$publisher_cpu" --blue "$blue_cpu" --placement "$workers" \
   --subscriber-pid "$subscriber_pid" --client-pid "$client_pid" > placement.json
 ```
 
-A nonzero result identifies an invalid configuration. A successful result
-verifies the sampled settings. Capture scheduler and interrupt activity
-separately, beginning before exchange startup and continuing during the
-loaded run. In a separate terminal, choose a duration that covers startup
-and the workload.
+A nonzero result identifies an invalid configuration or a placement file
+whose thread IDs fail verification. The verifier checks that the workers
+belong to the running process and that the startup thread has exited. The
+`bluezone` row lists both responsibilities of its single thread. BlueZone
+samples statistics and copies disconnect notices. The gateway handles
+replay framing and TCP delivery. The recipe writes the verified report to
+`build/redzone/placement.json`.
+
+Capture scheduler and interrupt activity separately, beginning before
+exchange startup and continuing during the loaded run. In a separate
+terminal, choose a duration that covers startup and the workload.
 
 ```sh
 sudo trace-cmd record -o redzone.dat -e sched:sched_switch \
@@ -172,6 +192,10 @@ sudo trace-cmd report -i redzone.dat > scheduler-irq.txt
 
 Review tasks scheduled and interrupts observed on the reserved CPUs. Record
 task identities, event loss, trace interval and any residual interruption.
+For a trace that includes startup, use `engine_startup_thread_id` from the
+placement report to identify Simplx's pre-`READY` activity. If the trace
+contains that thread on a reserved CPU during startup, record it in the
+evidence manifest's `residual_threads` with that explanation.
 Use the [test guide](../tests/acceptance/README.md) to qualify the captured
 evidence. Trace collection and high-volume diagnostic controls add work,
 so collect timing separately under equivalent placement. Shared last-level

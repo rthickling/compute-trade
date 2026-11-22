@@ -219,6 +219,28 @@ def same_iteration(command, worker):
     return seen[0]["iteration"]
 
 
+def case_burst_yields_between_callback_turns(exchange):
+    exchange.subscribe()
+    client = exchange.connect()
+    exchange.control("gate", name="command_processing", value=False)
+    ids = range(200, 240)
+    client.send(b"".join(client.encode_new_order(cid, 1, wire.SELL, 100, 1) for cid in ids))
+    last = exchange.wait_for("command_sequenced", client_order_id=239, **SESSION)
+    assert len(exchange.snapshot()["queued_command_sequences"]) == len(ids)
+
+    exchange.control("gate", name="command_processing", value=True)
+    for cid in ids:
+        acks(client, cid)
+    applied = [completed(exchange, cid) for cid in ids]
+    assert [command["command_sequence"] for command in applied] == list(
+        range(last["command_sequence"] - len(ids) + 1, last["command_sequence"] + 1)
+    )
+    for phase, limit in (("frame_complete", 4), ("book_applied", 32)):
+        turns = [command["stages"][phase]["iteration"] for command in applied]
+        assert turns == sorted(turns), turns
+        assert all(len(list(turn)) <= limit for _, turn in itertools.groupby(turns)), turns
+
+
 def case_actual_simplx_iteration(exchange):
     exchange.subscribe()
     placement = exchange.control("placement")
@@ -333,6 +355,43 @@ def case_injector_reports_incomplete_recovery(exchange):
         ]), report
 
 
+def case_replay_holds_history_while_other_sessions_trade(exchange):
+    exchange.subscribe()
+    seller = exchange.connect()
+    buyer = exchange.connect(access=2)
+    other_seller = exchange.connect(access=3)
+    seller.new_order(190, 1, wire.SELL, 100, 1)
+    seller.new_order(191, 1, wire.SELL, 101, 1)
+    first, second = [acks(seller, cid) for cid in (190, 191)]
+    seller.close(reset=True)
+    exchange.wait_for("command_complete", kind="disconnect", **SESSION)
+
+    exchange.control("gate", name="replay_send_through", value=first.fields["sequence"], **SESSION)
+    returning = exchange.connect(last_processed=0, wait=False)
+    returning.accept_logon()
+    assert returning.expect(wire.ACK, sequence=first.fields["sequence"]) == first
+    returning.new_order(194, 1, wire.SELL, 105, 1)
+
+    buyer.new_order(192, 1, wire.BUY, 100, 1)
+    acks(buyer, 192)
+    assert completed(exchange, 192, OTHER)["fills"] == []
+    # Other sessions can continue matching. The disconnected seller's orders
+    # are gone, and its pipelined request waits until replay is finished.
+    other_seller.new_order(193, 1, wire.SELL, 100, 1, firm="FIRM2")
+    acks(other_seller, 193)
+    assert len(completed(exchange, 193, {"logical_access_id": 3, "partition_id": 1})["fills"]) == 1
+    returning.expect_quiet()
+
+    exchange.control("gate", name="replay_send_through", value=None, **SESSION)
+    replay = returning.finish_logon()
+    assert [message.template_id for message in replay] == [wire.ACK, wire.KILL, wire.KILL], replay
+    assert replay[0] == second
+    assert [message.fields["order_id"] for message in replay[1:]] == [
+        first.fields["order_id"], second.fields["order_id"],
+    ]
+    assert acks(returning, 194).fields["sequence"] == second.fields["sequence"] + 3
+
+
 def physical_core(cpu, sysfs="/sys/devices/system/cpu"):
     topology = Path(sysfs) / f"cpu{cpu}" / "topology"
     return ((topology / "physical_package_id").read_text().strip(),
@@ -385,10 +444,14 @@ CASES = {
     }),
     "active_price_capacity": (case_price_capacity, {"active_prices": 1}),
     "sweep_capacity_is_atomic": (case_sweep_capacity_is_atomic, {"matching_max_fills": 1}),
+    "burst_yields_between_callback_turns": (case_burst_yields_between_callback_turns, {}),
     "actual_simplx_iteration": (case_actual_simplx_iteration, {}),
     "private_fills_and_replay": (case_private_fills_and_replay, {}),
     "injector_reports_incomplete_recovery": (case_injector_reports_incomplete_recovery, {
         "ordinary_replay_capacity": 1,
     }),
+    "replay_holds_history_while_other_sessions_trade": (
+        case_replay_holds_history_while_other_sessions_trade, {"ordinary_replay_capacity": 2},
+    ),
     "worker_placement_and_event_handoff": (case_worker_placement_and_event_handoff, {}),
 }

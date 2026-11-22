@@ -38,7 +38,7 @@ if(COMPUTE_TRADE_SANITIZERS)
     add_link_options(-fsanitize=address,undefined -fno-sanitize-recover=all)
 endif()
 set(SIMPLX_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../simplx" CACHE PATH
-    "Path to the rthickling/simplx checkout (tested at c0b2ca712f1c187b6c120d5bcaf441bdff1600ae)")
+    "Path to the rthickling/simplx checkout (tested at a4030196bb010c0e69797c2ad45d6bd3d44d8dde)")
 if(NOT EXISTS "${SIMPLX_SOURCE_DIR}/include/simplx.h" OR NOT EXISTS "${SIMPLX_SOURCE_DIR}/CMakeLists.txt")
     message(FATAL_ERROR "Simplx checkout missing. Clone github.com/rthickling/simplx beside this project, or set SIMPLX_SOURCE_DIR.")
 endif()

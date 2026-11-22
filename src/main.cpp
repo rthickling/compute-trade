@@ -36,7 +36,9 @@ int main(int argc, char **argv) {
                "Default: first allowed CPU, 127.0.0.1:9000; instruments 1 and "
                "2.\n"
                "Optiq mode: --config FILE [--market-port PORT] "
-               "[--publisher-core CPU] [--blue-core CPU] [--redzone]\n";
+               "[--publisher-core CPU] [--blue-core CPU] [--redzone]\n"
+               "Startup placement: --placement-file FILE\n"
+               "Ordinary testing only: --acceptance-control PATH\n";
         return 0;
       }
       if (option == "--redzone") {
@@ -63,6 +65,8 @@ int main(int argc, char **argv) {
         app.blue_core = static_cast<int>(number(value, 255));
       else if (option == "--acceptance-control")
         app.control_path = value;
+      else if (option == "--placement-file")
+        app.placement_path = value;
       else
         throw std::invalid_argument("unknown option: " + std::string(option));
     }
@@ -74,7 +78,7 @@ int main(int argc, char **argv) {
       return compute_trade::run_app(app, stopping);
     }
     if (app.redzone || app.publisher_core >= 0 || app.blue_core >= 0 ||
-        !app.control_path.empty() || app.market_port != 9001)
+        !app.control_path.empty() || !app.placement_path.empty() || app.market_port != 9001)
       throw std::invalid_argument("Optiq mode requires --config");
     compute_trade::Exchange exchange(config);
     const auto placement = exchange.placement();

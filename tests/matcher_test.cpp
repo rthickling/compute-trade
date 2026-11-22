@@ -57,7 +57,7 @@ void a_cross_reuses_capacity_from_removed_makers() {
   auto plan = book.make_plan();
   const auto maker = execute(book, plan, make_order(0, Side::Sell, 100, 1));
 
-  book.prepare(make_order(1, Side::Buy, 101, 2), plan);
+  book.prepare(make_order(0, Side::Buy, 101, 2), plan);
   CHECK(plan.rejection.empty());
   CHECK(plan.reservations_released == 1 && plan.needs_reservation);
   CHECK(plan.changes.size() == 2);
@@ -67,6 +67,12 @@ void a_cross_reuses_capacity_from_removed_makers() {
   const auto orders = book.snapshot();
   CHECK(orders.size() == 1 && orders[0].remaining == 1);
   CHECK(orders[0].order_id != maker && orders[0].side == Side::Buy);
+
+  book.prepare({.kind = MatchKind::Disconnect, .session = 0}, plan);
+  CHECK(plan.changes.size() == 1);
+  CHECK(plan.changes[0].order.order_id == orders[0].order_id);
+  book.commit(plan);
+  CHECK(book.snapshot().empty());
 }
 
 void a_reprice_uses_the_origin_reservation() {
@@ -95,6 +101,47 @@ void a_reprice_uses_the_origin_reservation() {
   CHECK(plan.changes.size() == 1 && plan.changes[0].order.order_id == maker);
   book.commit(plan);
   CHECK(book.snapshot().empty());
+}
+
+void disconnect_keeps_origin_id_order_after_fills_and_amendments() {
+  Matcher book({1}, 2, {});
+  auto plan = book.make_plan();
+  const auto first = execute(book, plan, make_order(0, Side::Sell, 105, 1));
+  const auto other = execute(book, plan, make_order(1, Side::Sell, 105, 1));
+  const auto cancelled = execute(book, plan, make_order(0, Side::Sell, 103, 1));
+  const auto filled = execute(book, plan, make_order(0, Side::Sell, 100, 1));
+  const auto last = execute(book, plan, make_order(0, Side::Sell, 104, 1));
+  const auto other_at_last_price =
+      execute(book, plan, make_order(1, Side::Sell, 104, 1));
+
+  execute(book, plan,
+          {MatchKind::Cancel, 1, firm, 1, Side::Sell, 103, 0, cancelled});
+  execute(book, plan, make_order(1, Side::Buy, 100, 1));
+  CHECK(plan.fills.size() == 1 && plan.fills[0].maker.order_id == filled);
+  execute(book, plan, {MatchKind::Replace, 1, firm, 1, Side::Sell, 110, 1, first});
+
+  const MatchCommand disconnect{.kind = MatchKind::Disconnect, .session = 0};
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    book.prepare(disconnect, plan);
+    CHECK(plan.changes.size() == 2 && plan.reservations_released == 2);
+    CHECK(plan.changes[0].order.order_id == first);
+    CHECK(plan.changes[0].order.price == 110);
+    CHECK(plan.changes[1].order.order_id == last);
+    CHECK(plan.changes[1].order.price == 104);
+  }
+  book.commit(plan);
+  const auto remaining = book.snapshot();
+  CHECK(remaining.size() == 2);
+  CHECK(remaining[0].order_id == other_at_last_price);
+  CHECK(remaining[1].order_id == other);
+
+  book.prepare(disconnect, plan);
+  CHECK(plan.changes.empty());
+  const auto reentered = execute(book, plan, make_order(0, Side::Sell, 106, 1));
+  book.prepare(disconnect, plan);
+  CHECK(plan.changes.size() == 1 && plan.changes[0].order.order_id == reentered);
+  book.commit(plan);
+  CHECK(book.snapshot().size() == 2);
 }
 
 struct AllocationBudget {
@@ -137,6 +184,7 @@ void failed_staging_leaves_makers_and_index_intact() {
   book.prepare(place, plan);
   CHECK(plan.reservations_released == 1 && plan.needs_reservation);
 
+  auto disconnect = book.make_plan();
   for (std::size_t allocations = 0; allocations != 3; ++allocations) {
     budget.remaining = allocations;
     bool failed = false;
@@ -150,6 +198,11 @@ void failed_staging_leaves_makers_and_index_intact() {
     const auto orders = book.snapshot();
     CHECK(orders.size() == 1 && orders[0].order_id == maker);
     CHECK(orders[0].remaining == 1 && orders[0].executed == 0);
+    book.prepare({.kind = MatchKind::Disconnect, .session = 1}, disconnect);
+    CHECK(disconnect.changes.empty());
+    book.prepare({.kind = MatchKind::Disconnect, .session = 0}, disconnect);
+    CHECK(disconnect.changes.size() == 1);
+    CHECK(disconnect.changes[0].order.order_id == maker);
   }
   CHECK(execute(book, plan, place) == maker + 1);
   CHECK(book.snapshot()[0].order_id == maker + 1);
@@ -161,6 +214,7 @@ int main() {
     rejecting_an_oversized_sweep_avoids_partial_execution();
     a_cross_reuses_capacity_from_removed_makers();
     a_reprice_uses_the_origin_reservation();
+    disconnect_keeps_origin_id_order_after_fills_and_amendments();
     failed_staging_leaves_makers_and_index_intact();
     return 0;
   } catch (const std::exception &error) {

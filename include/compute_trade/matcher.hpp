@@ -111,9 +111,49 @@ template <class Allocator = std::allocator<std::byte>> class Matcher {
 
   using LevelAllocator = Rebind<std::pair<const PriceKey, Queue>>;
   using Levels = std::map<PriceKey, Queue, PricePriority, LevelAllocator>;
-  using IndexAllocator = Rebind<std::pair<const std::uint64_t, OrderPosition>>;
+  using LevelPosition = typename Levels::iterator;
+
+  struct LiveOrder {
+    OrderPosition position;
+    LevelPosition level;
+    LiveOrder *previous{};
+    LiveOrder *next{};
+  };
+
+  // unordered_map rehash invalidates iterators but preserves element pointers.
+  // New IDs are appended in increasing order. An order stays linked to its
+  // original session through price or priority changes and unlinks on removal.
+  struct SessionOrders {
+    LiveOrder *head{};
+    LiveOrder *tail{};
+    std::size_t count{};
+
+    void append(LiveOrder &order) noexcept {
+      order.previous = tail;
+      if (tail)
+        tail->next = &order;
+      else
+        head = &order;
+      tail = &order;
+      ++count;
+    }
+
+    void unlink(const LiveOrder &order) noexcept {
+      if (order.previous)
+        order.previous->next = order.next;
+      else
+        head = order.next;
+      if (order.next)
+        order.next->previous = order.previous;
+      else
+        tail = order.previous;
+      --count;
+    }
+  };
+
+  using IndexAllocator = Rebind<std::pair<const std::uint64_t, LiveOrder>>;
   using Index =
-      std::unordered_map<std::uint64_t, OrderPosition, std::hash<std::uint64_t>,
+      std::unordered_map<std::uint64_t, LiveOrder, std::hash<std::uint64_t>,
                          std::equal_to<std::uint64_t>, IndexAllocator>;
 
   static constexpr auto null_order_id =
@@ -123,7 +163,7 @@ public:
   Matcher(std::vector<std::uint32_t> instruments, std::size_t session_count,
           MatchLimits limits, const Allocator &allocator = {})
       : allocator_(allocator), instruments_(std::move(instruments)),
-        counts_(session_count), limits_(limits),
+        session_orders_(session_count), limits_(limits),
         levels_(PricePriority{}, LevelAllocator{allocator}),
         by_id_(0, std::hash<std::uint64_t>{}, std::equal_to<std::uint64_t>{},
                IndexAllocator{allocator}) {
@@ -134,6 +174,9 @@ public:
     // A pending insertion can stage its node before releasing filled makers.
     by_id_.reserve(limits.live_orders_total + 1);
   }
+
+  Matcher(const Matcher &) = delete;
+  Matcher &operator=(const Matcher &) = delete;
 
   [[nodiscard]] MatchPlan make_plan() const {
     MatchPlan plan;
@@ -155,7 +198,7 @@ public:
     plan.maker_visits = 0;
     plan.price_visits = 0;
 
-    if (request.session >= counts_.size())
+    if (request.session >= session_orders_.size())
       return reject(plan, "unknown_session");
     if (request.kind == MatchKind::Disconnect)
       return prepare_disconnect(request.session, plan);
@@ -172,7 +215,8 @@ public:
     const auto target = by_id_.find(request.order_id);
     if (target == by_id_.end())
       return reject(plan, "unknown_order");
-    const BookOrder &original = *target->second;
+    const LiveOrder &entry = target->second;
+    const BookOrder &original = *entry.position;
     if (original.firm != request.firm)
       return reject(plan, "wrong_owner");
     if (original.instrument != request.instrument ||
@@ -184,7 +228,7 @@ public:
       append_removal(plan, original);
       return;
     }
-    prepare_replace(request, original, plan);
+    prepare_replace(request, entry, plan);
   }
 
   void commit(const MatchPlan &plan) {
@@ -199,12 +243,12 @@ public:
       ++next_id_;
       ++next_priority_;
     } else if (replacing && plan.result.remaining != 0) {
-      const OrderPosition position = by_id_.at(plan.result.order_id);
-      if (position->priority != plan.result.priority) {
-        move_to_tail(position, plan.result);
+      LiveOrder &entry = by_id_.at(plan.result.order_id);
+      if (entry.position->priority != plan.result.priority) {
+        move_to_tail(entry, plan.result);
         ++next_priority_;
       } else {
-        *position = plan.result;
+        *entry.position = plan.result;
       }
     } else if (replacing) {
       ++next_priority_;
@@ -216,7 +260,7 @@ public:
       } else if (change.kind == ChangeKind::Modify &&
                  (!replacing ||
                   change.order.order_id != plan.result.order_id)) {
-        *by_id_.at(change.order.order_id) = change.order;
+        *by_id_.at(change.order.order_id).position = change.order;
       }
     }
   }
@@ -250,15 +294,9 @@ private:
   }
 
   void prepare_disconnect(std::size_t session, MatchPlan &plan) const {
-    if (counts_[session] == 0)
-      return;
-    for (const auto &[id, position] : by_id_)
-      if (position->session == session)
-        append_removal(plan, *position);
-    std::sort(plan.changes.begin(), plan.changes.end(),
-              [](const BookChange &lhs, const BookChange &rhs) {
-                return lhs.order.order_id < rhs.order.order_id;
-              });
+    for (const LiveOrder *order = session_orders_[session].head; order;
+         order = order->next)
+      append_removal(plan, *order->position);
   }
 
   void prepare_new(const MatchCommand &request, MatchPlan &plan) const {
@@ -281,7 +319,7 @@ private:
     if (!plan.rejection.empty() || plan.result.remaining == 0)
       return;
 
-    std::size_t session_live = counts_[request.session];
+    std::size_t session_live = session_orders_[request.session].count;
     for (const auto &change : plan.changes)
       if (change.kind == ChangeKind::Remove &&
           change.order.session == request.session)
@@ -298,8 +336,9 @@ private:
     plan.changes.push_back({ChangeKind::Add, plan.result});
   }
 
-  void prepare_replace(const MatchCommand &request, const BookOrder &original,
+  void prepare_replace(const MatchCommand &request, const LiveOrder &entry,
                        MatchPlan &plan) const {
+    const BookOrder &original = *entry.position;
     if (request.price <= 0 || request.quantity <= original.executed ||
         request.quantity == null_order_id)
       return reject(plan, "invalid_amendment");
@@ -326,7 +365,7 @@ private:
       append_removal(plan, original);
     } else {
       if (repriced && !levels_.contains(key(plan.result))) {
-        if (levels_.find(key(original))->second.size() == 1)
+        if (entry.level->second.size() == 1)
           ++vacated_prices;
         if (levels_.size() - vacated_prices >= limits_.active_prices)
           return reject(plan, "active_price_capacity");
@@ -385,10 +424,11 @@ private:
       auto &queue = level->second;
       queue.push_back(order);
       try {
-        const bool inserted =
-            by_id_.try_emplace(order.order_id, std::prev(queue.end())).second;
+        const auto [entry, inserted] = by_id_.try_emplace(
+            order.order_id, LiveOrder{std::prev(queue.end()), level});
         if (!inserted)
           throw std::logic_error("order ID reused");
+        session_orders_[order.session].append(entry->second);
       } catch (...) {
         queue.pop_back();
         throw;
@@ -398,16 +438,16 @@ private:
         levels_.erase(level);
       throw;
     }
-    ++counts_[order.session];
   }
 
-  void move_to_tail(OrderPosition position, const BookOrder &replacement) {
-    const auto old = levels_.find(key(*position));
+  void move_to_tail(LiveOrder &entry, const BookOrder &replacement) {
+    const auto old = entry.level;
     const auto target =
         levels_.try_emplace(key(replacement), OrderAllocator{allocator_}).first;
     auto &queue = target->second;
-    queue.splice(queue.end(), old->second, position);
-    *position = replacement;
+    queue.splice(queue.end(), old->second, entry.position);
+    *entry.position = replacement;
+    entry.level = target;
     if (old->second.empty())
       levels_.erase(old);
   }
@@ -415,10 +455,10 @@ private:
   void remove_order(std::uint64_t id) {
     const auto item = by_id_.find(id);
     assert(item != by_id_.end());
-    const OrderPosition position = item->second;
-    const auto level = levels_.find(key(*position));
-    --counts_[position->session];
-    level->second.erase(position);
+    const LiveOrder &order = item->second;
+    const auto level = order.level;
+    session_orders_[order.position->session].unlink(order);
+    level->second.erase(order.position);
     by_id_.erase(item);
     if (level->second.empty())
       levels_.erase(level);
@@ -426,7 +466,7 @@ private:
 
   Allocator allocator_;
   std::vector<std::uint32_t> instruments_;
-  std::vector<std::size_t> counts_;
+  std::vector<SessionOrders> session_orders_;
   MatchLimits limits_;
   Levels levels_;
   Index by_id_;

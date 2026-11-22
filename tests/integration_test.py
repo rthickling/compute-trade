@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the real TCP actor path using a codec independent of the C++ codec."""
 
+import json
 import os
 import re
 import select
@@ -11,6 +12,10 @@ import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path
+
+from acceptance import wire
+from acceptance.driver import launch as launch_optiq
 
 SOFH = struct.Struct("!IH")
 SBE_HEADER = struct.Struct("<HHHH")
@@ -499,6 +504,44 @@ def startup_failures(exchange_executable):
             accepted(connection, 1, 0, 10)
 
 
+def startup_placement(executable):
+    with tempfile.TemporaryDirectory() as directory:
+        placement = Path(directory) / "workers.json"
+        with launch_optiq(executable, placement_file=placement) as exchange:
+            assert not exchange.control_path.exists()
+            data = json.loads(placement.read_text())
+            workers = {worker["role"]: worker for worker in data["workers"]}
+            assert set(workers) == {"gateway_matcher", "publisher", "bluezone"}
+            assert len(data["workers"]) == 3
+            tasks = Path(f'/proc/{data["process_id"]}/task')
+            assert workers["bluezone"]["responsibilities"] == ["statistics", "disconnect_replay"]
+            tids = {worker["thread_id"] for worker in workers.values()}
+            assert len(tids) == 3
+            startup_tid = data["engine_startup_thread_id"]
+            assert startup_tid > 0
+            assert startup_tid not in tids | {data["process_id"]}
+            assert not (tasks / str(startup_tid)).exists()
+            for worker in workers.values():
+                assert (tasks / str(worker["thread_id"])).is_dir(), worker
+                assert os.sched_getaffinity(worker["thread_id"]) == {worker["cpu"]}, worker
+            subscriber = exchange.subscribe()
+            client = exchange.connect()
+            client.new_order(1, 1, wire.SELL, 100, 1)
+            acknowledgement = client.reply(1)
+            assert acknowledgement.template_id == wire.ACK, acknowledgement
+            assert subscriber.read()["order_id"] == acknowledgement.fields["order_id"]
+
+        control = Path(directory) / "test.sock"
+        result = subprocess.run(
+            [executable, "--config", str(Path(directory) / "unused.json"),
+             "--redzone", "--acceptance-control", str(control)],
+            capture_output=True, text=True, timeout=TIMEOUT,
+        )
+        assert result.returncode != 0 and "READY " not in result.stdout, result
+        assert "--acceptance-control is incompatible with --redzone" in result.stderr, result
+        assert not control.exists()
+
+
 def main():
     if len(sys.argv) != 3:
         raise SystemExit(
@@ -533,6 +576,7 @@ def main():
             lambda: command_line_validation(exchange, injector),
         ),
         ("startup failures and cleanup", lambda: startup_failures(exchange)),
+        ("startup placement without acceptance control", lambda: startup_placement(exchange)),
     )
     for name, function in cases:
         function()

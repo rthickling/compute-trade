@@ -40,20 +40,16 @@ redzone-exchange matcher="" publisher="" blue="" config="config/local.json" mode
     [[ -n "{{ blue }}" ]] && args+=(--blue "{{ blue }}")
     eval "$(python3 tools/redzone_layout.py --export "${args[@]}")"
     python3 tools/redzone_layout.py "${args[@]}" > build/redzone/layout.json
-    control="$PWD/build/redzone/control.sock"
-    rm -f "$control"
+    workers="$PWD/build/redzone/workers.json"
+    rm -f "$workers"
     echo "layout matcher=$matcher_cpu publisher=$publisher_cpu blue=$blue_cpu" >&2
-    echo "control socket: $control" >&2
-    # isolcpus removes reserved CPUs from the default affinity mask; taskset them back in
-    # so validate_core / Simplx can place matcher and publisher threads.
-    cpus="$matcher_cpu,$publisher_cpu,$blue_cpu"
+    echo "worker placement: $workers" >&2
     exec sudo systemd-run --wait --pipe --collect --uid="$(id -u)" --gid="$(id -g)" \
         -p LimitRTPRIO=10 --working-directory="$PWD" \
-        taskset -c "$cpus" \
         "$PWD/build/{{ mode }}/bin/ct_exchange" --config "$PWD/{{ config }}" \
         --bind 127.0.0.1 --port "{{ port }}" --market-port "{{ market_port }}" \
         --core "$matcher_cpu" --publisher-core "$publisher_cpu" \
-        --blue-core "$blue_cpu" --redzone --acceptance-control "$control"
+        --blue-core "$blue_cpu" --redzone --placement-file "$workers"
 
 redzone-subscribe housekeeping="" port="9001":
     #!/usr/bin/env bash
@@ -76,7 +72,7 @@ redzone-subscribe housekeeping="" port="9001":
 
 # residual: comma-separated IRQ numbers, or set REDZONE_RESIDUAL.
 # Example: REDZONE_RESIDUAL=82,84 just redzone-placement
-redzone-placement matcher="" publisher="" blue="" control="build/redzone/control.sock" residual="":
+redzone-placement matcher="" publisher="" blue="" workers="build/redzone/workers.json" residual="":
     #!/usr/bin/env bash
     set -euo pipefail
     args=()
@@ -107,7 +103,7 @@ redzone-placement matcher="" publisher="" blue="" control="build/redzone/control
     fi
     python3 tools/redzone_status.py --strict --matcher "$matcher_cpu" \
         --publisher "$publisher_cpu" --blue "$blue_cpu" \
-        --control "{{ control }}" "${sub_args[@]}" "${residual_args[@]}" \
+        --placement "{{ workers }}" "${sub_args[@]}" "${residual_args[@]}" \
         | tee build/redzone/placement.json
 
 # Stop RedZone processes; reboot separately to clear nosmt/isolcpus.
@@ -132,7 +128,7 @@ redzone-stop:
             sudo systemctl stop "$unit" || true
         fi
     done
-    rm -f build/redzone/control.sock
+    rm -f build/redzone/workers.json
     if [[ -f build/redzone/workqueue.before ]]; then
         echo "restoring workqueue cpumask" >&2
         sudo tee /sys/devices/virtual/workqueue/cpumask < build/redzone/workqueue.before >/dev/null

@@ -183,11 +183,12 @@ struct Workers::Impl {
     std::atomic<bool> market_ready{false};
     std::atomic<bool> market_broken{false};
     std::atomic<bool> notice_copy{true};
+    // The publisher returns credits. The matcher advances production, and
+    // BlueZone reads the command count independently of publication.
     alignas(64) std::atomic<std::uint64_t> market_read{};
-    alignas(64) std::uint64_t market_written{};
-    std::atomic<std::uint64_t> market_published{};
-    std::atomic<std::uint64_t> completed{};
-    std::atomic<std::uint64_t> sampled_completed{};
+    alignas(64) std::atomic<std::uint64_t> market_published{};
+    alignas(64) std::atomic<std::uint64_t> completed{};
+    alignas(64) std::atomic<std::uint64_t> sampled_completed{};
     std::atomic<std::uint64_t> copied_notices{};
 };
 
@@ -334,6 +335,8 @@ private:
     }
 
     void drain_updates() noexcept {
+        if (event_head_ == event_tail_)
+            return;
         const auto visible = std::min(event_tail_, state_.market_published.load(std::memory_order_acquire));
         for (unsigned work = 0; work < 32 && event_head_ < visible; ++work) {
             if (!sent_)
@@ -378,9 +381,11 @@ public:
     }
 
     void onEvent(const NoticeEvent &event) {
+        // Every pending Event owns a distinct lane until its copy completes.
         if (pending_count_ == pending_.size())
             throw std::logic_error("notice Event queue overflow");
-        if (state_.lanes[event.lane].phase.load(std::memory_order_acquire) != BatchPhase::offered)
+        if (event.lane >= state_.lanes.size() ||
+            state_.lanes[event.lane].phase.load(std::memory_order_acquire) != BatchPhase::offered)
             throw std::logic_error("received a notice batch without a reservation");
         pending_[(head_ + pending_count_) % pending_.size()] = event.lane;
         ++pending_count_;
@@ -448,10 +453,9 @@ bool Workers::market_failed() const noexcept {
     return impl_->market_broken.load(std::memory_order_acquire);
 }
 
-std::array<WorkerLocation, 3> Workers::placement() const noexcept {
+std::array<WorkerLocation, 2> Workers::placement() const noexcept {
     return {impl_->publisher_thread.location("publisher"),
-            impl_->blue_thread.location("statistics"),
-            impl_->blue_thread.location("disconnect_replay")};
+            impl_->blue_thread.location("bluezone")};
 }
 
 WorkerStatistics Workers::statistics() const noexcept {
@@ -464,8 +468,9 @@ std::size_t Workers::market_available() const noexcept {
     if (!impl_->market_ready.load(std::memory_order_acquire) ||
         impl_->market_broken.load(std::memory_order_acquire))
         return 0;
+    const auto written = impl_->market_published.load(std::memory_order_relaxed);
     const auto read = impl_->market_read.load(std::memory_order_acquire);
-    return impl_->market.size() - static_cast<std::size_t>(impl_->market_written - read);
+    return impl_->market.size() - static_cast<std::size_t>(written - read);
 }
 
 void Workers::publish(Actor &sender, std::span<const MarketUpdate> updates,
@@ -473,7 +478,7 @@ void Workers::publish(Actor &sender, std::span<const MarketUpdate> updates,
     if (updates.empty())
         return;
     const auto consumed = impl_->market_read.load(std::memory_order_acquire);
-    const auto first = impl_->market_written;
+    const auto first = impl_->market_published.load(std::memory_order_relaxed);
     const auto room = impl_->market.size() - static_cast<std::size_t>(first - consumed);
     if (updates.size() > room)
         throw std::logic_error("market publication was not reserved");
@@ -483,8 +488,7 @@ void Workers::publish(Actor &sender, std::span<const MarketUpdate> updates,
     Actor::Event::Pipe(sender, impl_->publisher_id).push<MarketEvent>(
         first, updates.size(), command_sequence, diagnostic ? ::gettid() : -1,
         diagnostic ? ::sched_getcpu() : -1);
-    impl_->market_written += updates.size();
-    impl_->market_published.store(impl_->market_written, std::memory_order_release);
+    impl_->market_published.store(first + updates.size(), std::memory_order_release);
 }
 
 bool Workers::offer_notices(Actor &sender, std::uint64_t batch_id,
@@ -502,8 +506,14 @@ bool Workers::offer_notices(Actor &sender, std::uint64_t batch_id,
         std::copy(records.begin(), records.end(), lane.records.begin());
         lane.id = batch_id;
         lane.size = records.size();
-        Actor::Event::Pipe(sender, impl_->blue_id).push<NoticeEvent>(index);
         lane.phase.store(BatchPhase::offered, std::memory_order_release);
+        try {
+            Actor::Event::Pipe(sender, impl_->blue_id).push<NoticeEvent>(index);
+        } catch (...) {
+            // Simplx allocates and constructs before its noexcept chain append.
+            lane.phase.store(BatchPhase::free, std::memory_order_relaxed);
+            throw;
+        }
         return true;
     }
     return false;
@@ -536,7 +546,9 @@ void Workers::set_notice_copy(bool enabled) noexcept {
 }
 
 void Workers::record_command() noexcept {
-    impl_->completed.fetch_add(1, std::memory_order_relaxed);
+    // The matcher is the sole writer, so it can increment without a locked RMW.
+    const auto completed = impl_->completed.load(std::memory_order_relaxed);
+    impl_->completed.store(completed + 1, std::memory_order_relaxed);
 }
 
 } // namespace compute_trade

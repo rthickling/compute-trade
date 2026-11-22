@@ -16,12 +16,13 @@ the trust boundary.
 Use Linux, CMake 3.28 or newer, Ninja, a C++26 compiler, Python 3.10 or newer,
 and the json-c development package. On Ubuntu the CMake dependencies include
 `pkg-config` and `libjson-c-dev`. The baseline Simplx revision is
-`c0b2ca712f1c187b6c120d5bcaf441bdff1600ae`. Keep a sibling checkout or point
+`a4030196bb010c0e69797c2ad45d6bd3d44d8dde`. It includes the alignment fix and
+the startup fixes for sparse Linux CPU IDs on RedZone boots. Keep a sibling checkout or point
 at another checkout with `-DSIMPLX_SOURCE_DIR=/path/to/simplx`.
 
 ```sh
 git clone https://github.com/rthickling/simplx.git ../simplx
-git -C ../simplx switch --detach c0b2ca712f1c187b6c120d5bcaf441bdff1600ae
+git -C ../simplx switch --detach a4030196bb010c0e69797c2ad45d6bd3d44d8dde
 CXX=g++-16 cmake --preset acceptance
 cmake --build --preset acceptance --parallel
 ctest --test-dir build/acceptance --output-on-failure
@@ -35,14 +36,11 @@ checks, the original socket suite, and framework self-tests. The
 [acceptance guide](tests/acceptance/README.md) for individual scenarios and
 evidence validators.
 
-For ASan and UBSan, point the sanitizer build at an unmodified checkout of
-Simplx `8b57604f68150ebf929ebecff0b895f263b8e2c3`, which includes the engine
-alignment fix. The original revision fails UBSan during engine startup.
-The focused `simplx_alignment` test exercises startup, handler registration
-and actual Simplx Event delivery.
+ASan and UBSan use the same Simplx revision. The focused `simplx_alignment`
+test exercises startup, handler registration and actual Simplx Event delivery.
 
 ```sh
-CXX=g++-16 cmake --preset sanitizers -DSIMPLX_SOURCE_DIR=/path/to/fixed/simplx \
+CXX=g++-16 cmake --preset sanitizers \
   -DCOMPUTE_TRADE_ACCEPTANCE_LIVE=ON
 cmake --build --preset sanitizers --parallel
 UBSAN_OPTIONS=print_stacktrace=1 ctest --preset sanitizers

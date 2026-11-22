@@ -16,6 +16,7 @@ struct AppOptions {
   int publisher_core{-1};
   int blue_core{-1};
   bool redzone{};
+  std::string placement_path;
 };
 
 int run_app(const AppOptions &, const volatile std::sig_atomic_t &stopping);

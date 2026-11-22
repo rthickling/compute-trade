@@ -1,7 +1,6 @@
 #pragma once
 
 #include "compute_trade/app.hpp"
-#include "compute_trade/exchange.hpp"
 #include "compute_trade/matcher.hpp"
 #include "compute_trade/optiq.hpp"
 #include "json.hpp"
@@ -140,42 +139,6 @@ inline std::pair<int, int> physical_core(int cpu) {
   return {package, core};
 }
 
-inline Cores choose_cores(const AppOptions &options) {
-  cpu_set_t allowed;
-  CPU_ZERO(&allowed);
-  if (::sched_getaffinity(0, sizeof(allowed), &allowed) != 0)
-    throw std::runtime_error("cannot read process CPU affinity");
-  std::set<std::pair<int, int>> assigned;
-  const auto next = [&](int requested) {
-    if (requested >= 0) {
-      validate_core(static_cast<unsigned>(requested));
-      if (!assigned.insert(physical_core(requested)).second)
-        throw std::invalid_argument("gateway, publisher and BlueZone require distinct physical cores");
-      return static_cast<unsigned>(requested);
-    }
-    for (int core = 0; core < 256; ++core) {
-      if (CPU_ISSET(core, &allowed) && assigned.insert(physical_core(core)).second)
-        return static_cast<unsigned>(core);
-    }
-    throw std::invalid_argument("at least three distinct physical cores are required");
-  };
-  // Reserve explicit placements first so an automatic placement cannot occupy them.
-  Cores result{};
-  if (options.core >= 0)
-    result.matcher = next(options.core);
-  if (options.publisher_core >= 0)
-    result.publisher = next(options.publisher_core);
-  if (options.blue_core >= 0)
-    result.blue = next(options.blue_core);
-  if (options.core < 0)
-    result.matcher = next(-1);
-  if (options.publisher_core < 0)
-    result.publisher = next(-1);
-  if (options.blue_core < 0)
-    result.blue = next(-1);
-  return result;
-}
-
 inline std::set<unsigned> cpu_list(const std::string &path) {
   const auto text = read_file(path);
   std::set<unsigned> cpus;
@@ -208,21 +171,71 @@ inline std::set<unsigned> cpu_list(const std::string &path) {
   return cpus;
 }
 
-inline void validate_isolation(const Cores &cores) {
+inline cpu_set_t current_affinity() {
+  cpu_set_t allowed;
+  CPU_ZERO(&allowed);
+  if (::sched_getaffinity(0, sizeof(allowed), &allowed) != 0)
+    throw std::runtime_error("cannot read process CPU affinity");
+  return allowed;
+}
+
+inline Cores choose_cores(const AppOptions &options) {
   const std::string sysfs = "/sys/devices/system/cpu/";
-  const auto isolated = cpu_list(sysfs + "isolated");
-  const auto online = cpu_list(sysfs + "online");
-  for (auto cpu : {cores.matcher, cores.publisher}) {
-    if (!isolated.contains(cpu))
-      throw std::runtime_error("RedZone run invalid: reserved CPU is missing from kernel isolation");
-    const auto siblings = cpu_list(sysfs + "cpu" + std::to_string(cpu) + "/topology/thread_siblings_list");
-    for (auto sibling : siblings) {
-      if (sibling != cpu && online.contains(sibling))
-        throw std::runtime_error("RedZone run invalid: SMT sibling is still online");
-    }
+  const auto allowed = current_affinity();
+  std::set<unsigned> isolated, online;
+  if (options.redzone) {
+    isolated = cpu_list(sysfs + "isolated");
+    online = cpu_list(sysfs + "online");
   }
-  if (isolated.contains(cores.blue))
-    throw std::runtime_error("RedZone run invalid: BlueZone worker requires a housekeeping CPU");
+  const auto usable = [&](unsigned cpu, bool reserved) {
+    if (!reserved)
+      return CPU_ISSET(cpu, &allowed) && !isolated.contains(cpu);
+    if (!isolated.contains(cpu) || !online.contains(cpu))
+      return false;
+    const auto siblings = cpu_list(sysfs + "cpu" + std::to_string(cpu) + "/topology/thread_siblings_list");
+    return std::ranges::none_of(siblings, [&](auto sibling) {
+      return sibling != cpu && online.contains(sibling);
+    });
+  };
+  std::set<std::pair<int, int>> assigned;
+  const auto next = [&](int requested, bool reserved) {
+    if (requested >= 0) {
+      const auto cpu = static_cast<unsigned>(requested);
+      if (cpu > UINT8_MAX || !usable(cpu, reserved)) {
+        if (!options.redzone)
+          throw std::invalid_argument("core must be an allowed Linux CPU ID between 0 and 255");
+        if (reserved)
+          throw std::invalid_argument("RedZone run invalid: CPU " + std::to_string(cpu) +
+                                      " must be online and isolated with no online SMT sibling");
+        throw std::invalid_argument("RedZone run invalid: BlueZone requires an allowed housekeeping CPU");
+      }
+      if (!assigned.insert(physical_core(requested)).second)
+        throw std::invalid_argument("gateway, publisher and BlueZone require distinct physical cores");
+      return cpu;
+    }
+    for (unsigned cpu = 0; cpu <= UINT8_MAX; ++cpu) {
+      if (usable(cpu, reserved) && assigned.insert(physical_core(static_cast<int>(cpu))).second)
+        return cpu;
+    }
+    if (options.redzone)
+      throw std::invalid_argument("RedZone requires two isolated physical cores and one allowed housekeeping core");
+    throw std::invalid_argument("at least three distinct physical cores are required");
+  };
+  // Reserve explicit placements first so automatic placement cannot occupy them.
+  Cores result{};
+  if (options.core >= 0)
+    result.matcher = next(options.core, options.redzone);
+  if (options.publisher_core >= 0)
+    result.publisher = next(options.publisher_core, options.redzone);
+  if (options.blue_core >= 0)
+    result.blue = next(options.blue_core, false);
+  if (options.core < 0)
+    result.matcher = next(-1, options.redzone);
+  if (options.publisher_core < 0)
+    result.publisher = next(-1, options.redzone);
+  if (options.blue_core < 0)
+    result.blue = next(-1, false);
+  return result;
 }
 
 } // namespace compute_trade

@@ -8,6 +8,7 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <span>
 #include <stdexcept>
@@ -112,23 +113,26 @@ struct Frame {
 
 namespace detail {
 
+template <std::unsigned_integral T>
+T little_endian(T bits) {
+  static_assert(std::endian::native == std::endian::little ||
+                std::endian::native == std::endian::big);
+  if constexpr (std::endian::native == std::endian::big)
+    return std::byteswap(bits);
+  return bits;
+}
+
 template <std::integral T>
 T load(std::span<const std::byte> bytes, std::size_t offset) {
-  std::make_unsigned_t<T> bits{};
-  for (std::size_t i = 0; i < sizeof(T); ++i) {
-    bits |= static_cast<std::make_unsigned_t<T>>(
-        static_cast<std::uint64_t>(std::to_integer<unsigned>(bytes[offset + i]))
-        << (8 * i));
-  }
-  return std::bit_cast<T>(bits);
+  std::make_unsigned_t<T> bits;
+  std::memcpy(&bits, bytes.data() + offset, sizeof(bits));
+  return std::bit_cast<T>(little_endian(bits));
 }
 
 template <std::integral T>
 void store(std::span<std::byte> bytes, std::size_t offset, T value) {
-  const auto bits = std::bit_cast<std::make_unsigned_t<T>>(value);
-  for (std::size_t i = 0; i < sizeof(T); ++i) {
-    bytes[offset + i] = static_cast<std::byte>((bits >> (8 * i)) & 0xff);
-  }
+  const auto bits = little_endian(std::bit_cast<std::make_unsigned_t<T>>(value));
+  std::memcpy(bytes.data() + offset, &bits, sizeof(bits));
 }
 
 inline void store_firm(std::span<std::byte> bytes, const Firm &firm) {

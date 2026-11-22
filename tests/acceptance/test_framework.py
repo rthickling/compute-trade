@@ -1,8 +1,16 @@
 """Check the test framework's own parsers and evidence checks."""
 
 import io
+import json
+import os
+import subprocess
+import sys
+import threading
+import time
 import unittest
 from copy import deepcopy
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from . import extensions, hardware
 from .driver import check_fields, read_json
@@ -115,6 +123,21 @@ class HardwareEvidenceTest(unittest.TestCase):
         result = hardware.validate(self.manifest, hardware.trace_events(self.trace))
         self.assertEqual(result["redzone_cpus"], [1, 2])
 
+    def test_single_bluezone_worker_with_both_responsibilities(self):
+        workers = self.manifest["host"]["workers"]
+        statistics, replay = workers[2:4]
+        workers[2:4] = [{
+            **statistics,
+            "role": "bluezone",
+            "responsibilities": [statistics["role"], replay["role"]],
+        }]
+        result = hardware.validate(self.manifest, hardware.trace_events(self.trace))
+        self.assertEqual(result["redzone_cpus"], [1, 2])
+
+        workers.append(replay)
+        with self.assertRaisesRegex(ValueError, "invalid BlueZone responsibilities"):
+            hardware.validate(self.manifest, hardware.trace_events(self.trace))
+
     def test_rejects_active_sibling_or_other_work(self):
         smt = deepcopy(self.manifest)
         smt["host"]["online"].append(5)
@@ -153,3 +176,42 @@ class HardwareEvidenceTest(unittest.TestCase):
         del short["notice_burst"]["fresh_event_pages_by_cpu"]["2"]
         with self.assertRaisesRegex(ValueError, "sending cores"):
             hardware.validate(short, hardware.trace_events(self.trace))
+
+
+class PlacementStatusTest(unittest.TestCase):
+    def test_startup_thread_must_be_absent_from_exchange_tasks(self):
+        process_id = os.getpid()
+        cpu = str(min(os.sched_getaffinity(0)))
+        tool = Path(__file__).resolve().parents[2] / "tools/redzone_status.py"
+        with TemporaryDirectory() as directory:
+            placement = Path(directory) / "workers.json"
+            command = [
+                sys.executable, str(tool), "--matcher", cpu, "--publisher", cpu,
+                "--blue", cpu, "--placement", str(placement),
+            ]
+            stop = threading.Event()
+            startup = threading.Thread(target=stop.wait)
+            startup.start()
+            try:
+                tid = startup.native_id
+                placement.write_text(json.dumps({
+                    "process_id": process_id,
+                    "engine_startup_thread_id": tid,
+                    "workers": [{"role": "gateway_matcher", "cpu": int(cpu),
+                                 "thread_id": process_id}],
+                }))
+                result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 1, result)
+                self.assertIn(f"engine startup thread {tid} is still present", result.stderr)
+            finally:
+                stop.set()
+                startup.join()
+
+            task = Path(f"/proc/{process_id}/task/{tid}")
+            deadline = time.monotonic() + 1
+            while task.exists() and time.monotonic() < deadline:
+                time.sleep(0.001)
+            self.assertFalse(task.exists())
+            result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result)
+            self.assertEqual(json.loads(result.stdout)["engine_startup_thread_id"], tid)

@@ -71,7 +71,7 @@ public:
                   tredzone::Actor::CoreId blue_cpu);
   std::uint16_t market_port() const noexcept;
   bool market_failed() const noexcept;
-  std::array<WorkerLocation, 3> placement() const noexcept;
+  std::array<WorkerLocation, 2> placement() const noexcept;
   WorkerStatistics statistics() const noexcept;
 
   // The matcher is the single producer for the publication and notice rings.
@@ -85,6 +85,7 @@ public:
   std::optional<NoticeRecord> retained_notice(std::size_t slot) const noexcept;
   void release_notice(std::size_t slot) noexcept;
   void set_notice_copy(bool enabled) noexcept;
+  // Called only by the matcher. BlueZone samples the cumulative count.
   void record_command() noexcept;
 
 private:
