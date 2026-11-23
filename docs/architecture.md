@@ -111,7 +111,9 @@ private sequence already processed. The exchange sends Logon Ack then
 retained messages in private sequence order. A missed ordinary reply that
 aged out is reported as an inclusive gap. The client records unknown
 outcomes and receives remaining messages, including unconfirmed notices.
-A ReplayComplete marker precedes processing new requests on that connection.
+BlueZone encodes newly constructed replay frames and sends them alongside
+the saved, already encoded ordinary replies. A ReplayComplete marker
+precedes processing new requests on that connection.
 
 Compute Trade schema 1 version 1 adds template 200 Confirm with a uint32
 frontier, 201 ReplayGap with inclusive first and last uint32 sequences, and

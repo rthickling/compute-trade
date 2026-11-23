@@ -162,6 +162,7 @@ public:
         if (event.first != event_tail_)
             throw std::logic_error("market Event out of sequence");
         event_tail_ += event.count;
+        registerCallback(*this);
         if (state_.config.diagnostic) {
             const auto self = state_.publisher_thread.location("publisher");
             state_.log("market_event_received",
@@ -178,20 +179,24 @@ public:
             state_.publisher_thread.identify();
             identified_ = true;
         }
-        if (encoded_ != event_tail_) {
-            const auto published = state_.market_published.load(std::memory_order_acquire);
-            const auto limit = std::min(event_tail_, published);
-            const auto count = std::min<std::uint64_t>(limit - encoded_, 32);
-            for (std::uint64_t end = encoded_ + count; encoded_ != end; ++encoded_) {
-                const auto slot = encoded_ % state_.market.size();
-                const auto &record = state_.market[slot];
-                state_.encoded_market[slot] =
-                    market_wire::encode(record.update, record.command_sequence, encoded_ + 1);
-            }
-            if (count)
-                state_.market_encoded.store(encoded_, std::memory_order_release);
+        if (encoded_ == event_tail_)
+            return;
+
+        const auto published = state_.market_published.load(std::memory_order_acquire);
+        const auto limit = std::min(event_tail_, published);
+        const auto count = std::min<std::uint64_t>(limit - encoded_, 32);
+        for (std::uint64_t end = encoded_ + count; encoded_ != end; ++encoded_) {
+            const auto slot = encoded_ % state_.market.size();
+            const auto &record = state_.market[slot];
+            market_wire::encode(state_.encoded_market[slot], record.update,
+                                record.command_sequence, encoded_ + 1);
         }
-        registerCallback(*this);
+        if (count)
+            state_.market_encoded.store(encoded_, std::memory_order_release);
+        // Continue only while a received Event has work left. A batch may
+        // span several callbacks or still be awaiting the matcher's frontier.
+        if (encoded_ != event_tail_)
+            registerCallback(*this);
     }
 
 private:

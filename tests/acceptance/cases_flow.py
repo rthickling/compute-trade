@@ -3,6 +3,7 @@
 import time
 
 from . import extensions, wire
+from .driver import read_exact
 from .level3 import Level3View, ordered_book, visible_order
 
 
@@ -450,9 +451,14 @@ def interrupted_replay(exchange):
     interruption.expect(
         wire.ACK, client_order_id=30, order_id=prepared["order_id"], sequence=prepared["sequence"]
     )
-    # This is a second, distinct connection close on the same configured session.
-    interruption.close(reset=True)
+    notice_sequence = prepared["sequence"] + 1
+    exchange.control("gate", name="private_send_bytes", value=5, **_scope(1))
     exchange.control("gate", name="replay_send_through", value=None, **_scope(1))
+    exchange.wait_for("private_write_blocked", sequence=notice_sequence, bytes_written=5,
+                      **_scope(1))
+    read_exact(interruption.socket, 5)
+    interruption.close(reset=True)
+    exchange.control("gate", name="private_send_bytes", value=None, **_scope(1))
 
     retry = exchange.connect(access=1, last_processed=prepared["sequence"])
     _equal(
@@ -460,7 +466,7 @@ def interrupted_replay(exchange):
         "the fully processed acknowledgement is not replayed again",
     )
     [notice] = _kill_notices(retry.replay, [prepared["order_id"]])
-    _equal(notice["sequence"], prepared["sequence"] + 1, "retry starts at the next sequence")
+    _equal(notice["sequence"], notice_sequence, "retry sends the entire interrupted notice")
     retry.confirm(notice["sequence"])
     exchange.wait_for("private_confirmed", sequence=notice["sequence"], **_scope(1))
     _equal(exchange.snapshot()["notice_slots_occupied"], 0, "confirmation frees notice slot")
@@ -496,6 +502,14 @@ def ordinary_reply_gap(exchange):
     _equal(ack.fields["order_id"], retained["order_id"], "retained order ID pairing")
     _kill_notices(notices, [lost["order_id"], retained["order_id"]])
     _assert_increasing_private_sequences(returning.replay)
+
+    blue = next(worker for worker in exchange.control("placement")["workers"]
+                if worker["role"] == "order_transport")
+    for template, sequence in [(extensions.REPLAY_GAP, gap.fields["last_sequence"]),
+                               *[(wire.KILL, notice.fields["sequence"]) for notice in notices]]:
+        encoded = exchange.wait_for("replay_frame_encoded", template_id=template,
+                                    sequence=sequence, **_scope(1))
+        _equal(encoded["thread_id"], blue["thread_id"], "BlueZone encoded the replay frame")
 
     # Account for the gap and acknowledge the watermark up to the notices that arrived.
     last = notices[-1].fields["sequence"]

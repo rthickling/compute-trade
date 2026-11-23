@@ -82,6 +82,25 @@ void fills_keep_each_execution_quantity_and_party() {
   CHECK(late.maker.order_id == second && late.maker.remaining == 2);
   CHECK(late.maker.session == 1 && late.maker.firm == other_firm);
   CHECK(late.taker.remaining == 0);
+
+  CHECK(plan.changes.size() == 2);
+  CHECK(plan.changes[0].kind == ChangeKind::Remove);
+  CHECK(plan.changes[0].order.order_id == first && plan.changes[0].order.remaining == 0);
+  CHECK(plan.changes[1].kind == ChangeKind::Modify);
+  CHECK(plan.changes[1].order.order_id == second && plan.changes[1].order.remaining == 2);
+  const auto resting = book.snapshot();
+  CHECK(resting.size() == 1 && resting[0].executed == 2 && resting[0].remaining == 2);
+  CHECK(resting[0].priority == plan.changes[1].order.priority);
+
+  MatchCommand amend{MatchKind::Replace, 1, other_firm, 2, Side::Sell, 103, 2,
+                     second};
+  book.prepare(amend, plan);
+  CHECK(plan.rejection == "invalid_amendment");
+  amend.quantity = 3;
+  CHECK(execute(book, plan, amend) == second);
+  const auto moved = book.snapshot();
+  CHECK(moved.size() == 1 && moved[0].executed == 2 && moved[0].remaining == 1);
+  CHECK(moved[0].price == 103 && moved[0].priority > resting[0].priority);
 }
 
 void a_cross_reuses_capacity_from_removed_makers() {

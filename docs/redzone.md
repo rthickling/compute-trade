@@ -20,9 +20,11 @@ BlueZone polls the listener and active order sockets together, then services
 ready connections with bounded read and write work. The Simplx loop stays
 nonblocking so the colocated notice worker can continue to run.
 
-The publisher hands encoded binary frames to BlueZone in sequence. BlueZone
-sends up to 32 frames in a socket write. A partially written frame retains its publication
-slot. Insufficient publication credit makes the FIFO head wait. If delivery
+Market Events schedule the publisher, which encodes directly into the
+outgoing slots. Simplx still polls the isolated worker when the publisher
+has no work. BlueZone sends up to 32 frames per socket write. A partially
+written frame retains its publication slot. Insufficient publication
+credit makes the FIFO head wait. If delivery
 fails after subscription, the exchange stops so the next run can start with
 an empty book and a fresh subscriber.
 
@@ -200,8 +202,9 @@ A nonzero result identifies an invalid configuration or a placement file
 whose thread IDs fail verification. The verifier checks that the workers
 belong to the running process and that the startup thread has exited. The
 `bluezone` row lists order transport, statistics and disconnect notice
-copying as responsibilities of its single thread. The matcher prepares
-replay frames and BlueZone sends them. The recipe writes the verified
+copying as responsibilities of its single thread. The matcher sequences
+replay. BlueZone sends retained private bytes and encodes the replay gaps,
+disconnect notices and completion marker. The recipe writes the verified
 report to `build/redzone/placement.json`.
 
 Capture scheduler and interrupt activity separately, beginning before

@@ -392,6 +392,13 @@ class Gateway : public Actor, public Actor::Callback {
     return result;
   }
 
+  void defer_replay(Connection &connection, const Message &message, std::uint32_t sequence = 0) {
+    if (!connection.transport.outbound.empty())
+      throw std::logic_error("replay message cannot replace pending output");
+    connection.transport.replay_message = message;
+    append(connection, Reply{.sequence = sequence});
+  }
+
   void stage_replay(Connection &connection) {
     if (!connection.recovering || !connection.transport.outbound.empty())
       return;
@@ -409,7 +416,7 @@ class Gateway : public Actor, public Actor::Callback {
       Message response{};
       response.type = Template::ReplayComplete;
       response.sequence = connection.replay_frontier;
-      append(connection, {optiq::encode(response)});
+      defer_replay(connection, response);
       connection.replay_complete_queued = true;
       return;
     }
@@ -431,7 +438,7 @@ class Gateway : public Actor, public Actor::Callback {
       gap.type = Template::ReplayGap;
       gap.first_sequence = expected;
       gap.last_sequence = std::min(available, first - 1);
-      append(connection, {optiq::encode(gap), gap.last_sequence});
+      defer_replay(connection, gap, gap.last_sequence);
       connection.replay_cursor = gap.last_sequence;
     } else if (ordinary && first == ordinary_sequence) {
       append(connection, *ordinary);
@@ -441,7 +448,7 @@ class Gateway : public Actor, public Actor::Callback {
       auto retained = state_->workers->retained_notice(notice->record.slot);
       if (!retained)
         throw std::logic_error("BlueZone notice missing");
-      append(connection, {optiq::encode(notice_message(*retained)), first});
+      defer_replay(connection, notice_message(*retained), first);
       connection.replay_cursor = first;
       connection.replay_notice = notice->next;
     }
@@ -627,7 +634,7 @@ class Gateway : public Actor, public Actor::Callback {
             book.price, action == MarketUpdate::Action::remove ? 0 : book.remaining, book.priority};
   }
 
-  void reserve_notice(const BookOrder &order, std::uint64_t book_in_time) {
+  void reserve_notice(const ChangedOrder &order, std::uint64_t book_in_time) {
     const auto slot = free_notices_.back();
     free_notices_.pop_back();
     auto &identity = sessions_[order.session];

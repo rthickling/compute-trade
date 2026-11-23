@@ -54,9 +54,21 @@ struct BookOrder {
   std::size_t session{};
 };
 
+// Fields needed to publish a book change and retain a disconnect notice.
+struct ChangedOrder {
+  std::uint64_t order_id{};
+  std::uint64_t priority{};
+  std::int64_t price{};
+  std::uint64_t remaining{};
+  std::array<char, 8> firm{};
+  std::size_t session{};
+  std::uint32_t instrument{};
+  Side side{};
+};
+
 struct BookChange {
   ChangeKind kind{};
-  BookOrder order;
+  ChangedOrder order;
 };
 
 struct MatchFillParty {
@@ -270,7 +282,12 @@ public:
       } else if (change.kind == ChangeKind::Modify &&
                  (!replacing ||
                   change.order.order_id != plan.result.order_id)) {
-        *by_id_.at(change.order.order_id).position = change.order;
+        // Apart from the incoming replace handled above, only a partial
+        // maker fill can modify a resting order.
+        auto &maker = *by_id_.at(change.order.order_id).position;
+        assert(change.order.remaining < maker.remaining);
+        maker.executed += maker.remaining - change.order.remaining;
+        maker.remaining = change.order.remaining;
       }
     }
   }
@@ -288,8 +305,15 @@ private:
     return {order.instrument, order.side, order.price};
   }
 
-  static MatchFillParty fill_party(const BookOrder &order) noexcept {
-    return {order.order_id, order.remaining, order.firm, order.session};
+  static MatchFillParty fill_party(const BookOrder &order,
+                                  std::uint64_t remaining) noexcept {
+    return {order.order_id, remaining, order.firm, order.session};
+  }
+
+  static ChangedOrder changed_order(const BookOrder &order,
+                                    std::uint64_t remaining) noexcept {
+    return {order.order_id, order.priority, order.price, remaining, order.firm,
+            order.session, order.instrument, order.side};
   }
 
   static void reject(MatchPlan &plan, std::string_view reason) noexcept {
@@ -301,9 +325,8 @@ private:
     plan.reservations_released = 0;
   }
 
-  static void append_removal(MatchPlan &plan, BookOrder removed) {
-    removed.remaining = 0;
-    plan.changes.push_back({ChangeKind::Remove, removed});
+  static void append_removal(MatchPlan &plan, const BookOrder &removed) {
+    plan.changes.push_back({ChangeKind::Remove, changed_order(removed, 0)});
     ++plan.reservations_released;
   }
 
@@ -347,7 +370,8 @@ private:
       return reject(plan, "active_price_capacity");
 
     plan.needs_reservation = true;
-    plan.changes.push_back({ChangeKind::Add, plan.result});
+    plan.changes.push_back(
+        {ChangeKind::Add, changed_order(plan.result, plan.result.remaining)});
   }
 
   void prepare_replace(const MatchCommand &request, const LiveOrder &entry,
@@ -362,7 +386,8 @@ private:
     plan.result.remaining = request.quantity - original.executed;
     const bool repriced = request.price != original.price;
     if (!repriced && plan.result.remaining <= original.remaining) {
-      plan.changes.push_back({ChangeKind::Modify, plan.result});
+      plan.changes.push_back({ChangeKind::Modify,
+                              changed_order(plan.result, plan.result.remaining)});
       return;
     }
 
@@ -384,7 +409,8 @@ private:
         if (levels_.size() - vacated_prices >= limits_.active_prices)
           return reject(plan, "active_price_capacity");
       }
-      plan.changes.push_back({ChangeKind::Modify, plan.result});
+      plan.changes.push_back({ChangeKind::Modify,
+                              changed_order(plan.result, plan.result.remaining)});
     }
   }
 
@@ -412,21 +438,22 @@ private:
           return 0;
         }
         ++plan.maker_visits;
-        BookOrder maker = *order;
+        const auto &maker = *order;
         const auto quantity = std::min(maker.remaining, incoming.remaining);
-        maker.remaining -= quantity;
-        maker.executed += quantity;
+        const auto maker_remaining = maker.remaining - quantity;
         incoming.remaining -= quantity;
         incoming.executed += quantity;
-        plan.fills.push_back({fill_party(maker), fill_party(incoming), quantity,
-                              maker.price, maker.instrument, maker.side,
-                              incoming.side});
-        if (maker.remaining == 0) {
+        plan.fills.push_back({fill_party(maker, maker_remaining),
+                              fill_party(incoming, incoming.remaining),
+                              quantity, maker.price, maker.instrument,
+                              maker.side, incoming.side});
+        if (maker_remaining == 0) {
           append_removal(plan, maker);
           if (std::next(order) == queue.end())
             ++vacated_prices;
         } else {
-          plan.changes.push_back({ChangeKind::Modify, maker});
+          plan.changes.push_back(
+              {ChangeKind::Modify, changed_order(maker, maker_remaining)});
         }
       }
     }
