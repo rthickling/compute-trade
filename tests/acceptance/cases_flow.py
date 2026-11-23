@@ -514,6 +514,9 @@ def ordinary_reply_gap(exchange):
     # Account for the gap and acknowledge the watermark up to the notices that arrived.
     last = notices[-1].fields["sequence"]
     _equal(returning.replay_complete.fields["sequence"], last, "gap recovery frontier")
+    complete = exchange.wait_for(
+        "replay_frame_encoded", template_id=extensions.REPLAY_COMPLETE, **_scope(1))
+    _equal(complete["thread_id"], blue["thread_id"], "BlueZone encoded the replay completion")
     returning.confirm(last)
     exchange.wait_for("private_confirmed", sequence=last, **_scope(1))
     _equal(exchange.snapshot()["notice_slots_occupied"], 0, "confirming after a gap frees notices")

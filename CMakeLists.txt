@@ -87,6 +87,10 @@ if(BUILD_TESTING)
     add_executable(matcher_test tests/matcher_test.cpp)
     target_link_libraries(matcher_test PRIVATE compute_trade_headers)
     add_test(NAME matcher COMMAND matcher_test)
+    add_executable(market_wire_test tests/market_wire_test.cpp)
+    target_include_directories(market_wire_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(market_wire_test PRIVATE compute_trade_headers engine)
+    add_test(NAME market_wire COMMAND market_wire_test)
     add_executable(simplx_alignment_test tests/simplx_alignment_test.cpp)
     target_link_libraries(simplx_alignment_test PRIVATE compute_trade_headers engine)
     add_test(NAME simplx_alignment COMMAND simplx_alignment_test)
@@ -96,6 +100,12 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration_test.py"
         "$<TARGET_FILE:ct_exchange>" "$<TARGET_FILE:ct_injector>")
     set_tests_properties(exchange_integration PROPERTIES TIMEOUT 60)
+    add_test(NAME redzone_isolation COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/isolation_test.py"
+        "$<TARGET_FILE:ct_exchange>")
+    set_tests_properties(redzone_isolation PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        TIMEOUT 30 SKIP_RETURN_CODE 77)
     add_test(NAME acceptance_framework COMMAND "${Python3_EXECUTABLE}"
         -m unittest discover -s acceptance -t . -v)
     set_tests_properties(acceptance_framework PROPERTIES

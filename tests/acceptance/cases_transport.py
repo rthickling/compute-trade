@@ -4,6 +4,7 @@ import itertools
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -496,6 +497,55 @@ def case_worker_placement_and_event_handoff(exchange):
     assert sent["cpu"] == blue["cpu"]
 
 
+
+def case_publisher_encodes_only_when_an_event_arrives(exchange):
+    """An idle publisher does not keep its callback armed."""
+    subscriber = exchange.subscribe()
+    placement = exchange.control("placement")
+    publisher = worker_for(placement, "publisher")
+    matcher = worker_for(placement, "gateway_matcher")
+    blue = worker_for(placement, "order_transport")
+    before = exchange.control("statistics")["publisher_callbacks"]
+    assert before >= 1
+    time.sleep(0.05)
+    assert exchange.control("statistics")["publisher_callbacks"] == before
+
+    session = exchange.connect()
+    session.new_order(170, 1, wire.SELL, 100, 1)
+    received = exchange.wait_for("market_event_received", command_sequence=1)
+    assert received["receiver_thread_id"] == publisher["thread_id"]
+    assert received["receiver_cpu"] == publisher["cpu"]
+    assert received["sender_thread_id"] == matcher["thread_id"]
+    assert received["sender_cpu"] == matcher["cpu"]
+    sent = exchange.wait_for("market_frames_sent", sequence=1)
+    assert sent["thread_id"] == blue["thread_id"]
+    assert sent["cpu"] == blue["cpu"]
+    assert subscriber.read()["sequence"] == 1
+    after = exchange.control("statistics")["publisher_callbacks"]
+    assert before < after <= before + 2
+    time.sleep(0.05)
+    assert exchange.control("statistics")["publisher_callbacks"] == after
+    acks(session, 170)
+
+
+def case_execution_clock_is_sampled_after_the_match(exchange):
+    """book_in_time stays at decode; the fill time is taken when the match commits."""
+    exchange.subscribe()
+    seller, buyer = exchange.connect(), exchange.connect(access=2)
+    seller.new_order(180, 1, wire.SELL, 100, 1)
+    acks(seller, 180)
+    exchange.control("gate", name="command_processing", value=False)
+    buyer.new_order(181, 1, wire.BUY, 100, 1)
+    sequenced = exchange.wait_for("command_sequenced", client_order_id=181, **OTHER)
+    time.sleep(0.08)
+    exchange.control("gate", name="command_processing", value=True)
+    done = completed(exchange, 181, OTHER)
+    assert done["book_in_time"] == sequenced["book_in_time"]
+    acks(buyer, 181)
+    fill = buyer.expect(wire.FILL, execution_quantity=1, leaves_quantity=0)
+    assert fill.fields["trade_time"] > done["book_in_time"] + 30_000_000
+
+
 CASES = {
     "fragmented_and_coalesced": (case_fragmented_and_coalesced, {}),
     "invalid_framing_is_connection_local": (case_invalid_framing_is_connection_local, {}),
@@ -523,4 +573,10 @@ CASES = {
         case_replay_holds_history_while_other_sessions_trade, {"ordinary_replay_capacity": 2},
     ),
     "worker_placement_and_event_handoff": (case_worker_placement_and_event_handoff, {}),
+    "publisher_encodes_only_when_an_event_arrives": (
+        case_publisher_encodes_only_when_an_event_arrives, {},
+    ),
+    "execution_clock_is_sampled_after_the_match": (
+        case_execution_clock_is_sampled_after_the_match, {},
+    ),
 }

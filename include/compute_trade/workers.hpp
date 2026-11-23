@@ -46,6 +46,9 @@ struct WorkerStatistics {
   std::uint64_t commands_completed;
   std::uint64_t market_updates_sent;
   std::uint64_t notices_copied;
+  // Publisher callbacks observed while diagnostics are enabled. Ordinary runs
+  // leave this at zero; the counter itself is not incremented on that path.
+  std::uint64_t publisher_callbacks;
 };
 
 struct WorkersConfig {

@@ -225,6 +225,38 @@ template <class T> struct TestAllocator {
   }
 };
 
+
+void partial_fill_changes_remaining_and_executed_only() {
+  Matcher book({1}, 2, {});
+  auto plan = book.make_plan();
+  const auto id = execute(book, plan, make_order(0, Side::Sell, 100, 10));
+  const auto before = book.snapshot()[0];
+  CHECK(before.order_id == id && before.remaining == 10 && before.executed == 0);
+
+  execute(book, plan, make_order(1, Side::Buy, 100, 4));
+  CHECK(plan.changes.size() == 1);
+  CHECK(plan.changes[0].kind == ChangeKind::Modify);
+  const auto &change = plan.changes[0].order;
+  CHECK(change.order_id == id && change.remaining == 6);
+  CHECK(change.price == before.price && change.priority == before.priority);
+  CHECK(change.firm == before.firm && change.session == before.session);
+  CHECK(change.instrument == before.instrument && change.side == before.side);
+
+  const auto filled = book.snapshot()[0];
+  CHECK(filled.order_id == id && filled.remaining == 6 && filled.executed == 4);
+  CHECK(filled.price == before.price && filled.priority == before.priority);
+  CHECK(filled.firm == before.firm && filled.session == before.session);
+  CHECK(filled.instrument == before.instrument && filled.side == before.side);
+
+  // A smaller total quantity keeps the same priority and the executions already done.
+  MatchCommand reduce{MatchKind::Replace, 0, firm, 1, Side::Sell, 100, 5, id};
+  CHECK(execute(book, plan, reduce) == id);
+  const auto reduced = book.snapshot()[0];
+  CHECK(reduced.remaining == 1 && reduced.executed == 4);
+  CHECK(reduced.priority == before.priority && reduced.price == before.price);
+  CHECK(reduced.firm == before.firm && reduced.session == before.session);
+}
+
 void failed_staging_leaves_makers_and_index_intact() {
   // Opening a new level needs a level node, a resting order node, and an
   // index node. Trigger failure at each allocation before the match commits.
@@ -269,6 +301,7 @@ int main() {
     a_cross_reuses_capacity_from_removed_makers();
     a_reprice_uses_the_origin_reservation();
     disconnect_keeps_origin_id_order_after_fills_and_amendments();
+    partial_fill_changes_remaining_and_executed_only();
     failed_staging_leaves_makers_and_index_intact();
     return 0;
   } catch (const std::exception &error) {

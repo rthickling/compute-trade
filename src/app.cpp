@@ -957,7 +957,8 @@ class Gateway : public Actor, public Actor::Callback {
           const auto stats = state_->workers->statistics();
           ok(control, Json::object().set("commands_completed", stats.commands_completed)
                           .set("market_updates_sent", stats.market_updates_sent)
-                          .set("notices_copied", stats.notices_copied).dump());
+                          .set("notices_copied", stats.notices_copied)
+                          .set("publisher_callbacks", stats.publisher_callbacks).dump());
         }
         else if (operation == "gate") {
           gate(request);

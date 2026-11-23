@@ -148,6 +148,7 @@ struct Workers::Impl {
     alignas(64) std::atomic<std::uint64_t> completed{};
     alignas(64) std::atomic<std::uint64_t> sampled_completed{};
     std::atomic<std::uint64_t> copied_notices{};
+    std::atomic<std::uint64_t> publisher_callbacks{};
 };
 
 class Workers::Impl::Publisher : public Actor, public Actor::Callback {
@@ -175,6 +176,8 @@ public:
     }
 
     void onCallback() noexcept {
+        if (state_.config.diagnostic)
+            state_.publisher_callbacks.fetch_add(1, std::memory_order_relaxed);
         if (!identified_) {
             state_.publisher_thread.identify();
             identified_ = true;
@@ -461,7 +464,8 @@ std::array<WorkerLocation, 2> Workers::placement() const noexcept {
 WorkerStatistics Workers::statistics() const noexcept {
     return {impl_->sampled_completed.load(std::memory_order_relaxed),
             impl_->market_read.load(std::memory_order_relaxed),
-            impl_->copied_notices.load(std::memory_order_relaxed)};
+            impl_->copied_notices.load(std::memory_order_relaxed),
+            impl_->publisher_callbacks.load(std::memory_order_relaxed)};
 }
 
 std::size_t Workers::market_available() const noexcept {

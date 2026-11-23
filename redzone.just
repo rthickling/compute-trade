@@ -153,3 +153,13 @@ redzone-reboot: redzone-stop
     set -euo pipefail
     echo "Rebooting to the default (non-RedZone) GRUB entry…" >&2
     exec sudo reboot
+
+# Scheduling and affinity checks. Requires isolated CPUs and permission to use SCHED_FIFO.
+# `just test` registers the same script and skips it when either is unavailable.
+test-isolation mode="debug":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just build "{{ mode }}"
+    exec sudo systemd-run --wait --pipe --collect --uid="$(id -u)" --gid="$(id -g)" \
+        -p LimitRTPRIO=10 --working-directory="$PWD" \
+        python3 tests/isolation_test.py "$PWD/build/{{ mode }}/bin/ct_exchange"

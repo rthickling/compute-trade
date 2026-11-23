@@ -74,12 +74,51 @@ def required_options(exchange, injector):
         assert option in result.stderr and "required" in result.stderr, result
 
 
+
+def _cpu_list(text):
+    cpus = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            first, last = part.split("-", 1)
+            cpus.extend(range(int(first), int(last) + 1))
+        else:
+            cpus.append(int(part))
+    return cpus
+
+
+def redzone_rejects_cores_outside_the_isolated_set(executable):
+    isolated_text = Path("/sys/devices/system/cpu/isolated").read_text().strip()
+    online = _cpu_list(Path("/sys/devices/system/cpu/online").read_text())
+    with tempfile.TemporaryDirectory() as directory:
+        config = Path(directory) / "exchange.json"
+        config.write_text(json.dumps({
+            "instruments": [1],
+            "sessions": [{"logical_access_id": 1, "partition_id": 1, "firms": ["FIRM1"]}],
+        }))
+        command = [executable, "--config", str(config), "--bind", "127.0.0.1",
+                   "--port", "0", "--market-port", "0", "--redzone"]
+        if not isolated_text:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=TIMEOUT)
+            assert result.returncode != 0 and "READY " not in result.stdout, result
+            assert "two isolated physical cores" in result.stderr, result
+            return
+        housekeeping = next(cpu for cpu in online if cpu not in set(_cpu_list(isolated_text)))
+        result = subprocess.run([*command, "--core", str(housekeeping)],
+                                capture_output=True, text=True, timeout=TIMEOUT)
+        assert result.returncode != 0 and "READY " not in result.stdout, result
+        assert "must be online and isolated" in result.stderr, result
+
+
 def main():
     if len(sys.argv) != 3:
         raise SystemExit("Usage: integration_test.py EXCHANGE_EXECUTABLE INJECTOR_EXECUTABLE")
     exchange, injector = map(os.path.abspath, sys.argv[1:])
     required_options(exchange, injector)
     startup_placement(exchange, injector)
+    redzone_rejects_cores_outside_the_isolated_set(exchange)
 
 
 if __name__ == "__main__":
