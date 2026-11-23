@@ -76,7 +76,8 @@ Intake pauses if the command queue fills. Private writes with no progress for
 becomes ready, or blocking publication for 30 seconds, invalidates the
 market view and ends the run.
 
-The matching worker sends immutable update batches through Simplx Events.
+The matching worker converts its planned book changes directly into
+immutable handoff slots and sends their indexes through Simplx Events.
 The RedZone publisher assigns consecutive market sequence numbers, encodes
 the [demo SBE market-data schema](../schema/market-data.xml), and publishes
 the encoded slots to the BlueZone socket actor. Each update contains the command number, action,
@@ -111,8 +112,8 @@ private sequence already processed. The exchange sends Logon Ack then
 retained messages in private sequence order. A missed ordinary reply that
 aged out is reported as an inclusive gap. The client records unknown
 outcomes and receives remaining messages, including unconfirmed notices.
-BlueZone encodes newly constructed replay frames and sends them alongside
-the saved, already encoded ordinary replies. A ReplayComplete marker
+BlueZone encodes Logon replies and newly constructed replay frames and sends
+them alongside the saved, already encoded ordinary replies. A ReplayComplete marker
 precedes processing new requests on that connection.
 
 Compute Trade schema 1 version 1 adds template 200 Confirm with a uint32

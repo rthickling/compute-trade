@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <functional>
 #include <stdexcept>
@@ -81,10 +82,20 @@ public:
 enum class Phase { free, open, closed, retired };
 
 struct Reply {
-  // A zero-size frame requests encoding of the connection's staged replay message.
+  // A zero-size frame requests encoding of the connection's staged session message.
   optiq::Frame frame{};
   std::uint32_t sequence{};
   bool end_connection{};
+
+  Reply &operator=(const Reply &other) noexcept {
+    if (this != &other) {
+      std::memcpy(frame.bytes.data(), other.frame.bytes.data(), other.frame.size);
+      frame.size = other.frame.size;
+      sequence = other.sequence;
+      end_connection = other.end_connection;
+    }
+    return *this;
+  }
 };
 
 struct Slot {
@@ -93,9 +104,9 @@ struct Slot {
 
   SpscRing<optiq::Frame> inbound;
   SpscRing<Reply> outbound;
-  // Only one replay reply can be outstanding. The outbound ring publishes
+  // Only one deferred session reply can be outstanding. The outbound ring publishes
   // this message before BlueZone uses it and releases it after the final byte.
-  optiq::Message replay_message{};
+  optiq::Message session_message{};
   // Blue publishes open and closed. Red publishes retired once it has
   // detached the logical connection and finished using both rings.
   std::atomic<Phase> phase{Phase::free};

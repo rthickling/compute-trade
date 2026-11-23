@@ -295,6 +295,7 @@ def case_actual_simplx_iteration(exchange):
     assert transport["thread_id"] != worker["thread_id"]
     assert transport["cpu"] != worker["cpu"]
     seller, buyer = exchange.connect(), exchange.connect(access=2)
+    check_fields(exchange.wait_for("logon_ack_encoded", **SESSION), transport_identity)
 
     frame = seller.encode_new_order(150, 1, wire.SELL, 100, 2)
     seller.send(frame[:-1])

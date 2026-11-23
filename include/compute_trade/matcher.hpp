@@ -365,8 +365,8 @@ private:
       return reject(plan, "session_live_order_capacity");
     if (by_id_.size() - plan.reservations_released >= limits_.live_orders_total)
       return reject(plan, "live_order_capacity");
-    if (!levels_.contains(key(plan.result)) &&
-        levels_.size() - vacated_prices >= limits_.active_prices)
+    if (levels_.size() - vacated_prices >= limits_.active_prices &&
+        !levels_.contains(key(plan.result)))
       return reject(plan, "active_price_capacity");
 
     plan.needs_reservation = true;
@@ -403,10 +403,11 @@ private:
       // differed. The private fill already carries the execution price.
       append_removal(plan, original);
     } else {
-      if (repriced && !levels_.contains(key(plan.result))) {
+      if (repriced) {
         if (entry.level->second.size() == 1)
           ++vacated_prices;
-        if (levels_.size() - vacated_prices >= limits_.active_prices)
+        if (levels_.size() - vacated_prices >= limits_.active_prices &&
+            !levels_.contains(key(plan.result)))
           return reject(plan, "active_price_capacity");
       }
       plan.changes.push_back({ChangeKind::Modify,

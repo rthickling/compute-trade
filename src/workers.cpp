@@ -1,4 +1,5 @@
 #include "compute_trade/workers.hpp"
+#include "compute_trade/matcher.hpp"
 #include "market_wire.hpp"
 
 #include <arpa/inet.h>
@@ -56,6 +57,18 @@ struct alignas(64) MarketSlot {
     std::uint64_t command_sequence;
 };
 static_assert(sizeof(MarketSlot) == 64);
+
+MarketUpdate market_update(const BookChange &change) {
+    const auto &order = change.order;
+    MarketUpdate::Action action{};
+    switch (change.kind) {
+    case ChangeKind::Add: action = MarketUpdate::Action::add; break;
+    case ChangeKind::Modify: action = MarketUpdate::Action::modify; break;
+    case ChangeKind::Remove: action = MarketUpdate::Action::remove; break;
+    }
+    return {action, order.instrument, order.order_id, static_cast<std::uint8_t>(order.side),
+            order.price, action == MarketUpdate::Action::remove ? 0 : order.remaining, order.priority};
+}
 
 struct MarketEvent : Actor::Event {
     std::uint64_t first;
@@ -477,22 +490,23 @@ std::size_t Workers::market_available() const noexcept {
     return impl_->market.size() - static_cast<std::size_t>(written - read);
 }
 
-void Workers::publish(Actor &sender, std::span<const MarketUpdate> updates,
+void Workers::publish(Actor &sender, std::span<const BookChange> changes,
                       std::uint64_t command_sequence) {
-    if (updates.empty())
+    if (changes.empty())
         return;
     const auto consumed = impl_->market_read.load(std::memory_order_acquire);
     const auto first = impl_->market_published.load(std::memory_order_relaxed);
     const auto room = impl_->market.size() - static_cast<std::size_t>(first - consumed);
-    if (updates.size() > room)
+    if (changes.size() > room)
         throw std::logic_error("market publication was not reserved");
-    for (std::size_t index = 0; index < updates.size(); ++index)
-        impl_->market[(first + index) % impl_->market.size()] = {updates[index], command_sequence};
+    for (std::size_t index = 0; index < changes.size(); ++index)
+        impl_->market[(first + index) % impl_->market.size()] =
+            {market_update(changes[index]), command_sequence};
     const auto diagnostic = static_cast<bool>(impl_->config.diagnostic);
     Actor::Event::Pipe(sender, impl_->publisher_id).push<MarketEvent>(
-        first, updates.size(), command_sequence, diagnostic ? ::gettid() : -1,
+        first, changes.size(), command_sequence, diagnostic ? ::gettid() : -1,
         diagnostic ? ::sched_getcpu() : -1);
-    impl_->market_published.store(first + updates.size(), std::memory_order_release);
+    impl_->market_published.store(first + changes.size(), std::memory_order_release);
 }
 
 bool Workers::offer_notices(Actor &sender, std::uint64_t batch_id,

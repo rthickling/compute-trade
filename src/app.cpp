@@ -225,7 +225,6 @@ class Gateway : public Actor, public Actor::Callback {
   bool process_commands_{true};
   std::optional<std::size_t> publication_cap_;
   std::vector<std::size_t> reply_demand_;
-  std::vector<MarketUpdate> updates_;
 
   std::vector<NoticeSlot> notices_;
   std::vector<std::size_t> free_notices_;
@@ -308,8 +307,12 @@ class Gateway : public Actor, public Actor::Callback {
     connection.transport.outbound.push(message);
   }
 
-  void raw_reply(Connection &connection, const Message &message, bool close = false) {
-    append(connection, Reply{optiq::encode(message), 0, close});
+  void defer_session_reply(Connection &connection, const Message &message,
+                           std::uint32_t sequence = 0, bool close = false) {
+    if (!connection.transport.outbound.empty())
+      throw std::logic_error("session message cannot replace pending output");
+    connection.transport.session_message = message;
+    append(connection, Reply{.sequence = sequence, .end_connection = close});
   }
 
   void reap_notices(Session &identity) {
@@ -348,13 +351,15 @@ class Gateway : public Actor, public Actor::Callback {
       const auto now = state_->transport.monotonic_ns.load(std::memory_order_acquire);
       if (std::chrono::nanoseconds(now - connection.transport.opened_ns) > 5s) {
         connection.requested.reset();
-        raw_reply(connection, Message{.type = Template::LogonReject, .logon_reject_code = 2}, true);
+        defer_session_reply(connection, Message{.type = Template::LogonReject, .logon_reject_code = 2},
+                            0, true);
       }
       return;
     }
     if (connection.replay_cursor > identity.outbound) {
       connection.requested.reset();
-      raw_reply(connection, Message{.type = Template::LogonReject, .logon_reject_code = 2}, true);
+      defer_session_reply(connection, Message{.type = Template::LogonReject, .logon_reject_code = 2},
+                          0, true);
       return;
     }
 
@@ -376,7 +381,7 @@ class Gateway : public Actor, public Actor::Callback {
     while (connection.replay_notice != no_notice &&
            notices_[connection.replay_notice].record.sequence <= connection.replay_cursor)
       connection.replay_notice = notices_[connection.replay_notice].next;
-    raw_reply(connection, Message{.type = Template::LogonAck, .sequence = identity.received});
+    defer_session_reply(connection, Message{.type = Template::LogonAck, .sequence = identity.received});
   }
 
   Message notice_message(const NoticeRecord &notice) const {
@@ -390,13 +395,6 @@ class Gateway : public Actor, public Actor::Callback {
     result.time = optiq::null_order_id;
     result.book_in_time = notice.book_in_time;
     return result;
-  }
-
-  void defer_replay(Connection &connection, const Message &message, std::uint32_t sequence = 0) {
-    if (!connection.transport.outbound.empty())
-      throw std::logic_error("replay message cannot replace pending output");
-    connection.transport.replay_message = message;
-    append(connection, Reply{.sequence = sequence});
   }
 
   void stage_replay(Connection &connection) {
@@ -416,7 +414,7 @@ class Gateway : public Actor, public Actor::Callback {
       Message response{};
       response.type = Template::ReplayComplete;
       response.sequence = connection.replay_frontier;
-      defer_replay(connection, response);
+      defer_session_reply(connection, response);
       connection.replay_complete_queued = true;
       return;
     }
@@ -438,7 +436,7 @@ class Gateway : public Actor, public Actor::Callback {
       gap.type = Template::ReplayGap;
       gap.first_sequence = expected;
       gap.last_sequence = std::min(available, first - 1);
-      defer_replay(connection, gap, gap.last_sequence);
+      defer_session_reply(connection, gap, gap.last_sequence);
       connection.replay_cursor = gap.last_sequence;
     } else if (ordinary && first == ordinary_sequence) {
       append(connection, *ordinary);
@@ -448,7 +446,7 @@ class Gateway : public Actor, public Actor::Callback {
       auto retained = state_->workers->retained_notice(notice->record.slot);
       if (!retained)
         throw std::logic_error("BlueZone notice missing");
-      defer_replay(connection, notice_message(*retained), first);
+      defer_session_reply(connection, notice_message(*retained), first);
       connection.replay_cursor = first;
       connection.replay_notice = notice->next;
     }
@@ -457,7 +455,8 @@ class Gateway : public Actor, public Actor::Callback {
   void logon(Connection &connection, const Message &request) {
     auto index = session_indices_.find({request.logical_access_id, request.partition_id});
     if (index == session_indices_.end()) {
-      raw_reply(connection, Message{.type = Template::LogonReject, .logon_reject_code = 1}, true);
+      defer_session_reply(connection, Message{.type = Template::LogonReject, .logon_reject_code = 1},
+                          0, true);
       return;
     }
     connection.requested = index->second;
@@ -622,18 +621,6 @@ class Gateway : public Actor, public Actor::Callback {
     send_private(party.session, response);
   }
 
-  MarketUpdate market_update(const BookChange &change) {
-    const auto &book = change.order;
-    MarketUpdate::Action action{};
-    switch (change.kind) {
-    case ChangeKind::Add: action = MarketUpdate::Action::add; break;
-    case ChangeKind::Modify: action = MarketUpdate::Action::modify; break;
-    case ChangeKind::Remove: action = MarketUpdate::Action::remove; break;
-    }
-    return {action, book.instrument, book.order_id, static_cast<std::uint8_t>(book.side),
-            book.price, action == MarketUpdate::Action::remove ? 0 : book.remaining, book.priority};
-  }
-
   void reserve_notice(const ChangedOrder &order, std::uint64_t book_in_time) {
     const auto slot = free_notices_.back();
     free_notices_.pop_back();
@@ -763,9 +750,12 @@ class Gateway : public Actor, public Actor::Callback {
       }
     }
     for (std::size_t i = 0; i < sessions_.size(); ++i) {
-      if (reply_demand_[i] > connection_capacity(i))
+      const auto demand = reply_demand_[i];
+      if (!demand)
+        continue;
+      if (demand > connection_capacity(i))
         return blocked(command, "reply", 0);
-      if (reply_demand_[i] > UINT32_MAX - 2 - sessions_[i].outbound)
+      if (demand > UINT32_MAX - 2 - sessions_[i].outbound)
         throw std::overflow_error("private application sequence exhausted before applying command");
     }
     if (rejection.empty() && command.disconnect &&
@@ -776,15 +766,12 @@ class Gateway : public Actor, public Actor::Callback {
       throw std::overflow_error("execution sequence exhausted before applying command");
     }
 
-    updates_.clear();
     auto book_in_time = optiq::null_order_id;
     if (rejection.empty()) {
       const auto available = std::min(state_->workers->market_available(),
                                       publication_cap_.value_or(limits_.publication));
       if (available < plan_.changes.size())
         return blocked(command, "publication", plan_.changes.size());
-      for (const auto &change : plan_.changes)
-        updates_.push_back(market_update(change));
       book_in_time = command.disconnect
                          ? state_->transport.epoch_ns.load(std::memory_order_acquire)
                          : command.book_in_time;
@@ -816,8 +803,8 @@ class Gateway : public Actor, public Actor::Callback {
         if (++next_execution_id_ == UINT32_MAX)
           throw std::overflow_error("execution sequence exhausted");
       }
-      if (!updates_.empty())
-        state_->workers->publish(*this, updates_, command.sequence);
+      if (!plan_.changes.empty())
+        state_->workers->publish(*this, plan_.changes, command.sequence);
     }
     update_peaks();
     state_->workers->record_command();
@@ -843,7 +830,8 @@ class Gateway : public Actor, public Actor::Callback {
       }
     }
     auto row = with_command(command);
-    row.set("fills", std::move(fills)).set("market_update_count", updates_.size())
+    row.set("fills", std::move(fills))
+        .set("market_update_count", rejection.empty() ? plan_.changes.size() : 0)
         .set("matcher_ns", matcher_ns);
     if (!rejection.empty())
       row.set("rejection_reason", rejection);
@@ -1060,7 +1048,6 @@ public:
     batch_.reserve(limits_.notice_batch);
     for (auto &flight : notice_batches_)
       flight.slots.reserve(limits_.notice_batch);
-    updates_.reserve(std::max(limits_.book.matching_max_fills + 2, limits_.book.live_orders_per_session));
     controls_.reserve(16);
     registerCallback(*this);
   }

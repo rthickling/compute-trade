@@ -14,6 +14,8 @@
 
 namespace compute_trade {
 
+struct BookChange;
+
 struct MarketUpdate {
   enum class Action { add, modify, remove };
   Action action;
@@ -79,7 +81,7 @@ public:
 
   // The matcher is the single producer for the publication and notice rings.
   std::size_t market_available() const noexcept;
-  void publish(tredzone::Actor &sender, std::span<const MarketUpdate> updates,
+  void publish(tredzone::Actor &sender, std::span<const BookChange> changes,
                std::uint64_t command_sequence);
 
   bool offer_notices(tredzone::Actor &sender, std::uint64_t batch_id,

@@ -35,7 +35,7 @@ struct TcpConnection {
   std::size_t input_start{};
   std::size_t buffered{};
   std::size_t written{};
-  optiq::Frame replay_frame{};
+  optiq::Frame session_frame{};
   Clock::time_point pending_since{};
   bool malformed_input{};
   bool write_reported{};
@@ -91,7 +91,7 @@ class TcpWorker : public Actor, public Actor::Callback {
       connection.input_start = 0;
       connection.buffered = 0;
       connection.written = 0;
-      connection.replay_frame.size = 0;
+      connection.session_frame.size = 0;
       connection.pending_since = {};
       connection.malformed_input = false;
       connection.write_reported = false;
@@ -187,15 +187,17 @@ class TcpWorker : public Actor, public Actor::Callback {
     if (connection.pending_since == Clock::time_point{})
       connection.pending_since = now;
     const auto session = slot.session.load(std::memory_order_acquire);
-    if (reply->frame.size == 0 && connection.replay_frame.size == 0) {
-      connection.replay_frame = optiq::encode(slot.replay_message);
+    if (reply->frame.size == 0 && connection.session_frame.size == 0) {
+      connection.session_frame = optiq::encode(slot.session_message);
       if (diag_.enabled() && session != SIZE_MAX) {
-        diag_.record("replay_frame_encoded", with_session(session)
+        const auto type = slot.session_message.type;
+        const auto event = type == optiq::Template::LogonAck ? "logon_ack_encoded" : "replay_frame_encoded";
+        diag_.record(event, with_session(session)
                         .set("sequence", reply->sequence)
-                        .set("template_id", static_cast<unsigned>(slot.replay_message.type)));
+                        .set("template_id", static_cast<unsigned>(type)));
       }
     }
-    const auto &encoded = reply->frame.size ? reply->frame : connection.replay_frame;
+    const auto &encoded = reply->frame.size ? reply->frame : connection.session_frame;
     const auto frame = encoded.view().subspan(connection.written);
     auto *gate = session == SIZE_MAX ? nullptr : &transport_.send_gates[session];
     auto budget = gate ? gate->remaining.load(std::memory_order_acquire) : SIZE_MAX;
@@ -233,7 +235,7 @@ class TcpWorker : public Actor, public Actor::Callback {
     if (diag_.enabled() && reply->sequence && session != SIZE_MAX)
       diag_.record("private_frame_written", with_session(session).set("sequence", reply->sequence));
     const bool end_connection = reply->end_connection;
-    connection.replay_frame.size = 0;
+    connection.session_frame.size = 0;
     slot.outbound.pop();
     connection.written = 0;
     connection.write_reported = false;
