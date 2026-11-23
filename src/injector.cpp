@@ -1,5 +1,4 @@
 #include "compute_trade/optiq.hpp"
-#include "compute_trade/sbe.hpp"
 #include "compute_trade/types.hpp"
 
 #include <arpa/inet.h>
@@ -10,7 +9,6 @@
 #include <unistd.h>
 
 #include <algorithm>
-#include <array>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
@@ -19,7 +17,6 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -56,7 +53,7 @@ struct Options {
 };
 
 void usage(std::ostream &out) {
-  out << "Usage: ct_injector [options]\n"
+  out << "Usage: ct_injector --logical-access N [options]\n"
          "  --host IPv4       Destination address (default 127.0.0.1)\n"
          "  --port N          TCP port, 1..65535 (default 9000)\n"
          "  --count N         Number of orders, 1..1000000000 (default 10)\n"
@@ -65,7 +62,7 @@ void usage(std::ostream &out) {
          "  --quantity N      Positive whole quantity units (default 10)\n"
          "  --window N        Outstanding orders per batch, 1..1024 (default "
          "1)\n"
-         "  --logical-access N  Select an Optiq session instead of legacy framing\n"
+         "  --logical-access N  Logical Access ID for the Optiq session\n"
          "  --partition N       Optiq partition (default 1)\n"
          "  --firm CODE         Optiq executing firm (default FIRM1)\n"
          "  --cancel ID         Send a Cancel Request for the exchange Order ID\n"
@@ -75,7 +72,7 @@ void usage(std::ostream &out) {
          "  --recovery-state PATH  Resume and checkpoint processed private messages\n"
          "  --report-json PATH  Write the replay frontier, gaps, and unknown outcomes\n"
          "  --help              Show this help\n\n"
-         "New orders alternate buy/sell at one price. Wall timings include TCP and client processing.\n";
+         "New orders alternate buy/sell at one price.\n";
 }
 
 std::uint64_t number(std::string_view name, std::string_view text,
@@ -95,7 +92,6 @@ std::uint64_t number(std::string_view name, std::string_view text,
 
 Options parse_options(int argc, char **argv) {
   Options result;
-  bool session_credentials{};
   for (int index = 1; index < argc; ++index) {
     const std::string_view flag(argv[index]);
     if (flag == "--help") {
@@ -143,10 +139,8 @@ Options parse_options(int argc, char **argv) {
           number(flag, value, compute_trade::optiq::null_sequence - 1, 0));
     } else if (flag == "--partition") {
       result.partition = static_cast<std::uint16_t>(number(flag, value, 65534, 0));
-      session_credentials = true;
     } else if (flag == "--firm") {
       result.firm = value;
-      session_credentials = true;
     } else if (flag == "--recovery-state") {
       result.recovery_state = value;
     } else if (flag == "--report-json") {
@@ -161,20 +155,14 @@ Options parse_options(int argc, char **argv) {
       (result.replay_only && (result.cancel_id != 0 || result.replace_id != 0))) {
     throw std::invalid_argument("choose one of --cancel, --replace or --replay-only");
   }
-  if (!result.logical_access && (session_credentials || result.replay_only || result.cancel_id != 0 ||
-      result.replace_id != 0 || !result.recovery_state.empty() || !result.report.empty())) {
-    throw std::invalid_argument("Optiq options require --logical-access");
+  if (!result.help && !result.logical_access) {
+    throw std::invalid_argument("--logical-access is required");
   }
   if (result.sell && result.cancel_id == 0 && result.replace_id == 0) {
     throw std::invalid_argument("--sell requires --cancel or --replace");
   }
   if (!result.report.empty() && result.report == result.recovery_state) {
     throw std::invalid_argument("recovery state and report must use distinct paths");
-  }
-  if (result.quantity >
-      std::numeric_limits<std::uint64_t>::max() / result.count) {
-    throw std::invalid_argument(
-        "count times quantity exceeds the statistics counter range");
   }
   return result;
 }
@@ -250,7 +238,7 @@ public:
       }
       if (received == 0) {
         throw std::runtime_error(
-            "connection closed before all acknowledgements arrived");
+            "connection closed before the complete message arrived");
       }
       bytes = bytes.subspan(static_cast<std::size_t>(received));
     }
@@ -259,79 +247,6 @@ public:
 private:
   int fd_{-1};
 };
-
-compute_trade::Acknowledgement receive_acknowledgement(const Socket &socket) {
-  std::array<std::byte, compute_trade::sbe::max_frame_size> frame{};
-  socket.receive_all(std::span(frame).first(compute_trade::sbe::sofh_size));
-  const auto length = compute_trade::sbe::frame_length(
-      std::span<const std::byte>(frame).first(compute_trade::sbe::sofh_size));
-  socket.receive_all(std::span(frame).subspan(
-      compute_trade::sbe::sofh_size, length - compute_trade::sbe::sofh_size));
-  return compute_trade::sbe::decode_acknowledgement(
-      std::span<const std::byte>(frame).first(length));
-}
-
-int inject(const Options &options) {
-  using namespace compute_trade;
-  Socket socket(options);
-  std::uint64_t accepted{};
-  std::uint64_t rejected{};
-  std::uint64_t executed{};
-  const auto start = std::chrono::steady_clock::now();
-  for (std::uint64_t first = 1; first <= options.count;) {
-    const auto batch = std::min(options.window, options.count - first + 1);
-    for (std::uint64_t index = 0; index < batch; ++index) {
-      const auto id = first + index;
-      const NewOrder order{id, options.instrument,
-                           id % 2 == 1 ? Side::Buy : Side::Sell, options.price,
-                           options.quantity};
-      socket.send_all(sbe::encode(order));
-    }
-    for (std::uint64_t index = 0; index < batch; ++index) {
-      const auto ack = receive_acknowledgement(socket);
-      if (ack.client_order_id != first + index ||
-          ack.instrument_id != options.instrument) {
-        throw std::runtime_error(
-            "acknowledgement does not identify the expected order");
-      }
-      if (ack.status == Status::Accepted) {
-        if (ack.reason != RejectReason::None || ack.order_id == 0 ||
-            ack.order_id == std::numeric_limits<std::uint64_t>::max() ||
-            ack.remaining_quantity > options.quantity ||
-            ack.executed_quantity !=
-                options.quantity - ack.remaining_quantity) {
-          throw std::runtime_error("invalid accepted acknowledgement");
-        }
-        ++accepted;
-        executed += ack.executed_quantity;
-      } else if (ack.status == Status::Rejected) {
-        if (ack.reason == RejectReason::None || ack.order_id != 0 ||
-            ack.executed_quantity != 0 || ack.remaining_quantity != 0) {
-          throw std::runtime_error("invalid rejected acknowledgement");
-        }
-        ++rejected;
-        std::cerr << "Order " << ack.client_order_id
-                  << " rejected, reason=" << static_cast<unsigned>(ack.reason)
-                  << '\n';
-      } else {
-        throw std::runtime_error("unknown acknowledgement status");
-      }
-    }
-    first += batch;
-  }
-  const double elapsed =
-      std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
-          .count();
-  std::cout << "orders=" << options.count << " accepted=" << accepted
-            << " rejected=" << rejected << " executed_units=" << executed
-            << '\n'
-            << std::fixed << std::setprecision(6)
-            << "client_wall_seconds=" << elapsed << '\n'
-            << std::setprecision(2) << "client_wall_orders_per_second="
-            << (elapsed > 0 ? static_cast<double>(options.count) / elapsed : 0)
-            << '\n';
-  return rejected == 0 ? 0 : 1;
-}
 
 namespace optiq = compute_trade::optiq;
 
@@ -621,7 +536,7 @@ std::uint32_t replay(const Socket &socket, const Options &options, Recovery &sta
   }
 }
 
-int inject_optiq(const Options &options) {
+int inject(const Options &options) {
   using optiq::Template;
   using compute_trade::Side;
   const auto firm = optiq::firm_id(options.firm);
@@ -718,7 +633,7 @@ int main(int argc, char **argv) {
       usage(std::cout);
       return 0;
     }
-    return options.logical_access ? inject_optiq(options) : inject(options);
+    return inject(options);
   } catch (const std::exception &error) {
     std::cerr << "ct_injector: " << error.what() << '\n';
     return 1;

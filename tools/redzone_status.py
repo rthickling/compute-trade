@@ -9,7 +9,8 @@ from pathlib import Path
 
 CPU = Path("/sys/devices/system/cpu")
 WORKQUEUE = Path("/sys/devices/virtual/workqueue/cpumask")
-BLUE_RESPONSIBILITIES = ("statistics", "disconnect_replay")
+LEGACY_BLUE_RESPONSIBILITIES = ("statistics", "disconnect_replay")
+BLUE_RESPONSIBILITIES = (*LEGACY_BLUE_RESPONSIBILITIES, "order_transport")
 
 
 def read(path):
@@ -65,21 +66,34 @@ def workers_by_role(workers):
     aliases = [rows[role] for role in BLUE_RESPONSIBILITIES if role in rows]
     if "bluezone" in rows:
         responsibilities = rows["bluezone"].get("responsibilities")
+        expected = (
+            BLUE_RESPONSIBILITIES
+            if isinstance(responsibilities, list) and "order_transport" in responsibilities
+            else LEGACY_BLUE_RESPONSIBILITIES
+        )
         if (
             aliases
             or not isinstance(responsibilities, list)
-            or len(responsibilities) != len(BLUE_RESPONSIBILITIES)
-            or any(role not in responsibilities for role in BLUE_RESPONSIBILITIES)
+            or len(responsibilities) != len(expected)
+            or any(role not in responsibilities for role in expected)
         ):
             raise ValueError("invalid BlueZone responsibilities")
-    elif len(aliases) == 2 and aliases[0]["thread_id"] == aliases[1]["thread_id"]:
-        if aliases[0]["cpu"] != aliases[1]["cpu"]:
-            raise ValueError("BlueZone aliases disagree on the observed CPU")
-        for role in BLUE_RESPONSIBILITIES:
-            del rows[role]
-        rows["bluezone"] = {
-            **aliases[0], "role": "bluezone", "responsibilities": list(BLUE_RESPONSIBILITIES),
-        }
+    else:
+        has_transport = "order_transport" in rows
+        expected = BLUE_RESPONSIBILITIES if has_transport else LEGACY_BLUE_RESPONSIBILITIES
+        same_thread = len(aliases) == len(expected) and all(
+            worker["thread_id"] == aliases[0]["thread_id"] for worker in aliases
+        )
+        if has_transport and not same_thread:
+            raise ValueError("BlueZone aliases must identify one thread")
+        if same_thread:
+            if any(worker["cpu"] != aliases[0]["cpu"] for worker in aliases):
+                raise ValueError("BlueZone aliases disagree on the observed CPU")
+            for role in expected:
+                del rows[role]
+            rows["bluezone"] = {
+                **aliases[0], "role": "bluezone", "responsibilities": list(expected),
+            }
 
     exchange_threads = [worker["thread_id"] for role, worker in rows.items()
                         if role not in ("test_client", "subscriber")]
@@ -220,7 +234,7 @@ def report(args):
                 potential.append(f"{role} is not pinned to its reserved CPU")
             if worker["scheduler"] != os.SCHED_FIFO or worker["priority"] <= 0:
                 potential.append(f"{role} lacks Simplx real-time scheduling")
-        blue_roles = ("bluezone",) if "bluezone" in jobs else BLUE_RESPONSIBILITIES
+        blue_roles = ("bluezone",) if "bluezone" in jobs else LEGACY_BLUE_RESPONSIBILITIES
         for role in blue_roles:
             worker = jobs.get(role)
             if (

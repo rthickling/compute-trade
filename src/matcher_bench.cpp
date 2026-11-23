@@ -37,6 +37,13 @@ struct Settings {
   Mode mode{};
 };
 
+struct Trade {
+  std::uint64_t maker_order_id;
+  std::uint64_t taker_order_id;
+  std::int64_t price;
+  std::uint64_t quantity;
+};
+
 struct Work {
   std::uint64_t maker_visits{};
   std::uint64_t price_visits{};
@@ -152,7 +159,7 @@ void record_fills(const MatchPlan &plan, std::size_t expected,
     return;
   std::transform(plan.fills.begin(), plan.fills.end(), output.begin(),
                  [](const MatchFill &fill) {
-    return Trade{fill.maker.order_id, fill.taker.order_id, fill.maker.price,
+    return Trade{fill.maker.order_id, fill.taker.order_id, fill.price,
                  fill.quantity};
   });
 }

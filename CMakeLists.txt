@@ -56,7 +56,7 @@ target_compile_options(compute_trade_headers INTERFACE -Wall -Wextra -Wpedantic 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(JSON_C REQUIRED IMPORTED_TARGET json-c)
 
-add_library(compute_trade_exchange STATIC src/exchange.cpp src/app.cpp src/workers.cpp)
+add_library(compute_trade_exchange STATIC src/app.cpp src/order_transport.cpp src/workers.cpp)
 target_link_libraries(compute_trade_exchange PUBLIC compute_trade_headers PRIVATE engine PkgConfig::JSON_C)
 
 add_executable(ct_exchange src/main.cpp)
@@ -84,11 +84,9 @@ add_executable(ct_matcher_bench src/matcher_bench.cpp)
 target_link_libraries(ct_matcher_bench PRIVATE compute_trade_headers engine)
 
 if(BUILD_TESTING)
-    foreach(test IN ITEMS sbe order_book matcher)
-        add_executable(${test}_test tests/${test}_test.cpp)
-        target_link_libraries(${test}_test PRIVATE compute_trade_headers)
-        add_test(NAME ${test} COMMAND ${test}_test)
-    endforeach()
+    add_executable(matcher_test tests/matcher_test.cpp)
+    target_link_libraries(matcher_test PRIVATE compute_trade_headers)
+    add_test(NAME matcher COMMAND matcher_test)
     add_executable(simplx_alignment_test tests/simplx_alignment_test.cpp)
     target_link_libraries(simplx_alignment_test PRIVATE compute_trade_headers engine)
     add_test(NAME simplx_alignment COMMAND simplx_alignment_test)

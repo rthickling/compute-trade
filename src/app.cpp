@@ -3,9 +3,11 @@
 #include "app_config.hpp"
 #include "app_io.hpp"
 #include "diagnostics.hpp"
+#include "order_transport.hpp"
 
 #include <simplx.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -15,7 +17,6 @@
 #include <future>
 #include <iostream>
 #include <optional>
-#include <poll.h>
 #include <thread>
 
 namespace compute_trade {
@@ -32,13 +33,11 @@ using Clock = std::chrono::steady_clock;
 
 constexpr std::size_t no_connection = SIZE_MAX;
 constexpr std::size_t no_notice = SIZE_MAX;
-constexpr std::size_t frames_per_connection = 4;
 constexpr std::size_t commands_per_turn = 32;
 
-std::uint64_t epoch_nanoseconds() {
-  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-      std::chrono::system_clock::now().time_since_epoch()).count());
-}
+using order_transport::Phase;
+using order_transport::Reply;
+using order_transport::Slot;
 
 template <typename T>
 class Ring {
@@ -67,25 +66,12 @@ public:
     head_ = wrap(head_ + 1);
     --count_;
   }
-  void clear() { count_ = 0; head_ = 0; }
-};
-
-bool closed_socket(const auto &connection) {
-  pollfd descriptor{connection.fd.get(), POLLRDHUP, 0};
-  return ::poll(&descriptor, 1, 0) > 0 && (descriptor.revents & (POLLRDHUP | POLLHUP | POLLERR));
-}
-
-struct Stored {
-  Frame frame{};
-  std::uint32_t sequence{};
-  bool end_replay{};
-  bool end_connection{};
 };
 
 struct Session {
   SessionKey key;
   std::vector<std::array<char, 8>> firms;
-  Ring<Stored> replay;
+  Ring<Reply> replay;
   std::size_t active{no_connection};
   std::size_t first_notice{no_notice};
   std::size_t last_notice{no_notice};
@@ -94,8 +80,6 @@ struct Session {
   std::uint32_t confirmed{};
   bool started{};
   bool disconnect_waiting{};
-  bool allow_send{true};
-  std::optional<std::size_t> send_bytes;
   std::optional<std::uint32_t> replay_through;
 
   Session(const SessionRule &rule, std::size_t capacity)
@@ -103,36 +87,24 @@ struct Session {
 };
 
 struct Connection {
-  Socket fd;
-  std::array<std::byte, 4096> input{};
-  std::size_t input_start{};
-  std::size_t buffered{};
-  Ring<Stored> out;
-  std::size_t written{};
+  Slot &transport;
+  bool open{};
   std::optional<std::size_t> session;
   std::optional<std::size_t> requested;
   bool recovering{};
+  bool replay_complete_queued{};
   std::uint32_t replay_cursor{};
   std::uint32_t replay_frontier{};
   std::size_t replay_ordinary{};
   std::size_t replay_notice{no_notice};
-  Clock::time_point activity{};
-  Clock::time_point pending_since{};
-  bool write_reported{};
 
-  explicit Connection(std::size_t capacity) : out(capacity) {}
-  void reset(Socket socket = {}) {
-    fd = std::move(socket);
-    input_start = 0;
-    buffered = 0;
-    written = 0;
-    out.clear();
+  explicit Connection(Slot &slot) : transport(slot) {}
+  void reset() {
+    open = false;
     session.reset();
     requested.reset();
     recovering = false;
-    write_reported = false;
-    pending_since = {};
-    activity = Clock::now();
+    replay_complete_queued = false;
   }
 };
 
@@ -150,7 +122,8 @@ struct Command {
   Message request{};
   std::size_t session{};
   std::uint64_t sequence{};
-  Sample assembled{};
+  std::uint64_t book_in_time{};
+  Sample decode_started{};
   bool disconnect{};
   bool bad_sequence{};
   std::string_view reported_block;
@@ -181,15 +154,15 @@ struct Control {
 
 struct AppState {
   std::shared_ptr<Workers> workers;
+  order_transport::Transport transport;
   Diagnostics diag;
   std::atomic<bool> failed{};
   std::atomic<int> matcher_tid{-1};
   std::atomic<int> matcher_cpu{-1};
-  std::uint16_t port{};
   std::atomic_flag recording_error{};
   std::array<char, 512> error{};
 
-  explicit AppState(bool diagnostics) : diag(diagnostics) {}
+  AppState(const Config &config, bool diagnostics) : transport(config), diag(diagnostics) {}
 
   void fail(std::string_view message) noexcept {
     if (recording_error.test_and_set(std::memory_order_relaxed))
@@ -211,10 +184,12 @@ Json placement(const AppState &state, bool role_aliases) {
   if (role_aliases) {
     workers.push(worker_row("statistics", blue.cpu, blue.thread_id));
     workers.push(worker_row("disconnect_replay", blue.cpu, blue.thread_id));
+    workers.push(worker_row("order_transport", state.transport.cpu.load(), state.transport.tid.load()));
   } else {
     auto responsibilities = Json::array();
     responsibilities.push("statistics");
     responsibilities.push("disconnect_replay");
+    responsibilities.push("order_transport");
     workers.push(worker_row(blue.role, blue.cpu, blue.thread_id)
                      .set("responsibilities", std::move(responsibilities)));
   }
@@ -228,16 +203,16 @@ struct GatewayInit {
 };
 
 class Gateway : public Actor, public Actor::Callback {
-  AppOptions options_;
   Limits limits_;
   std::shared_ptr<AppState> state_;
   std::vector<Session> sessions_;
   std::vector<Connection> connections_;
+  std::vector<std::size_t> active_slots_;
+  std::uint64_t accepted_connections_{};
   std::map<SessionKey, std::size_t> session_indices_;
   std::vector<Control> controls_;
   std::size_t input_start_{};
 
-  Socket listener_;
   app_io::UnixListener control_;
   Matcher<Actor::Allocator<std::byte>> matcher_;
   MatchPlan plan_;
@@ -282,7 +257,8 @@ class Gateway : public Actor, public Actor::Callback {
     if (command.disconnect)
       row.set("kind", "disconnect");
     else
-      row.set("client_order_id", command.request.client_order_id);
+      row.set("client_order_id", command.request.client_order_id)
+          .set("book_in_time", command.book_in_time);
     return row;
   }
 
@@ -315,6 +291,11 @@ class Gateway : public Actor, public Actor::Callback {
     connection.reset();
   }
 
+  void close_connection(std::size_t slot) {
+    disconnect(slot);
+    connections_[slot].transport.close_requested.store(true, std::memory_order_release);
+  }
+
   void sequence_disconnects() {
     while (!pending_disconnects_.empty() && commands_.available()) {
       enqueue(Command{.session = pending_disconnects_.front(), .disconnect = true,
@@ -323,63 +304,12 @@ class Gateway : public Actor, public Actor::Callback {
     }
   }
 
-  void append(Connection &connection, const Stored &message) {
-    if (connection.out.empty())
-      connection.pending_since = Clock::now();
-    connection.out.push(message);
+  void append(Connection &connection, const Reply &message) {
+    connection.transport.outbound.push(message);
   }
 
   void raw_reply(Connection &connection, const Message &message, bool close = false) {
-    append(connection, Stored{optiq::encode(message), 0, false, close});
-  }
-
-  void flush(std::size_t slot) {
-    auto &connection = connections_[slot];
-    if (connection.out.empty())
-      return;
-    auto &next = connection.out.front();
-    const auto frame = next.frame.view().subspan(connection.written);
-    std::size_t limit = frame.size();
-    auto *identity = connection.session ? &sessions_[*connection.session] : nullptr;
-    if (identity && !identity->allow_send)
-      limit = 0;
-    if (identity && identity->send_bytes)
-      limit = std::min(limit, *identity->send_bytes);
-    if (limit == 0) {
-      if (state_->diag.enabled() && !connection.write_reported && connection.session) {
-        event("private_write_blocked", with_session(*connection.session)
-                  .set("sequence", next.sequence).set("bytes_written", connection.written));
-        connection.write_reported = true;
-      }
-      return;
-    }
-
-    const auto sent = ::send(connection.fd.get(), frame.data(), limit, MSG_NOSIGNAL);
-    if (sent <= 0) {
-      if (sent == 0 || !app_io::retryable() ||
-          Clock::now() - connection.pending_since > 30s)
-        disconnect(slot);
-      return;
-    }
-    connection.pending_since = Clock::now();
-    connection.written += static_cast<std::size_t>(sent);
-    if (identity && identity->send_bytes)
-      *identity->send_bytes -= static_cast<std::size_t>(sent);
-    if (connection.written != next.frame.size)
-      return;
-
-    if (next.end_replay) {
-      connection.recovering = false;
-      if (state_->diag.enabled())
-        event("replay_completed", with_session(*connection.session).set("sequence", connection.replay_frontier));
-    }
-    if (next.end_connection) {
-      disconnect(slot);
-      return;
-    }
-    connection.out.pop();
-    connection.written = 0;
-    connection.write_reported = false;
+    append(connection, Reply{optiq::encode(message), 0, close});
   }
 
   void reap_notices(Session &identity) {
@@ -415,7 +345,8 @@ class Gateway : public Actor, public Actor::Callback {
     const auto index = *connection.requested;
     auto &identity = sessions_[index];
     if (identity.active != no_connection || identity.disconnect_waiting) {
-      if (Clock::now() - connection.activity > 5s) {
+      const auto now = state_->transport.monotonic_ns.load(std::memory_order_acquire);
+      if (std::chrono::nanoseconds(now - connection.transport.opened_ns) > 5s) {
         connection.requested.reset();
         raw_reply(connection, Message{.type = Template::LogonReject, .logon_reject_code = 2}, true);
       }
@@ -428,6 +359,7 @@ class Gateway : public Actor, public Actor::Callback {
     }
 
     connection.session = index;
+    connection.transport.session.store(index, std::memory_order_release);
     connection.requested.reset();
     identity.active = slot;
     identity.started = true;
@@ -461,19 +393,28 @@ class Gateway : public Actor, public Actor::Callback {
   }
 
   void stage_replay(Connection &connection) {
-    if (!connection.recovering || !connection.out.empty())
+    if (!connection.recovering || !connection.transport.outbound.empty())
       return;
     const auto owner = *connection.session;
     auto &identity = sessions_[owner];
+    if (connection.replay_complete_queued) {
+      connection.replay_complete_queued = false;
+      connection.recovering = false;
+      connection.transport.allow_intake.store(true, std::memory_order_release);
+      if (state_->diag.enabled())
+        event("replay_completed", with_session(owner).set("sequence", connection.replay_frontier));
+      return;
+    }
     if (connection.replay_cursor == connection.replay_frontier) {
       Message response{};
       response.type = Template::ReplayComplete;
       response.sequence = connection.replay_frontier;
-      append(connection, {optiq::encode(response), 0, true, false});
+      append(connection, {optiq::encode(response)});
+      connection.replay_complete_queued = true;
       return;
     }
 
-    const Stored *ordinary = connection.replay_ordinary < identity.replay.size()
+    const Reply *ordinary = connection.replay_ordinary < identity.replay.size()
                                  ? &identity.replay.at(connection.replay_ordinary) : nullptr;
     const NoticeSlot *notice = connection.replay_notice != no_notice
                                    ? &notices_[connection.replay_notice] : nullptr;
@@ -520,11 +461,13 @@ class Gateway : public Actor, public Actor::Callback {
                 .set("resuming", sessions_[index->second].started));
   }
 
-  bool handle(std::size_t slot, const Message &message) {
+  bool handle(std::size_t slot, const Message &message, Sample decode_started,
+              std::uint64_t book_in_time) {
     auto &connection = connections_[slot];
     if (!connection.session) {
       if (message.type != Template::Logon)
         return false;
+      connection.transport.allow_intake.store(false, std::memory_order_release);
       logon(connection, message);
       return true;
     }
@@ -542,74 +485,42 @@ class Gateway : public Actor, public Actor::Callback {
                               message.sequence >= UINT32_MAX - 1;
     if (!bad_sequence)
       identity.received = message.sequence;
-    enqueue(Command{message, index, 0, state_->diag.enabled() ? sample() : Sample{},
-                    false, bad_sequence, {}});
-    return true;
-  }
-
-  bool parse(std::size_t slot) {
-    auto &connection = connections_[slot];
-    if (connection.buffered < optiq::header_size)
-      return false;
-    try {
-      const auto input = std::span(connection.input).subspan(connection.input_start, connection.buffered);
-      const auto length = optiq::frame_length(input);
-      if (length > connection.buffered)
-        return false;
-      const auto request = optiq::decode(input.first(length));
-      connection.buffered -= length;
-      connection.input_start = connection.buffered ? connection.input_start + length : 0;
-      if (handle(slot, request))
-        return true;
-    } catch (const std::invalid_argument &) {
-      // Invalid stream framing is connection-local.
-    }
-    disconnect(slot);
+    enqueue(Command{.request = message, .session = index, .book_in_time = book_in_time,
+                    .decode_started = decode_started, .bad_sequence = bad_sequence,
+                    .reported_block = {}});
     return true;
   }
 
   std::size_t service_input(std::size_t slot, std::size_t budget) {
     auto &connection = connections_[slot];
+    auto &transport = connection.transport;
     std::size_t frames = 0;
-    bool received = false;
-    while (frames < budget && commands_.available() && connection.fd &&
-           !connection.requested && !connection.recovering &&
-           (connection.session || connection.out.empty())) {
-      if (parse(slot)) {
-        ++frames;
-        continue;
+    while (frames < budget && commands_.available() && connection.open &&
+           transport.allow_intake.load(std::memory_order_relaxed)) {
+      const Frame *frame = transport.inbound.front();
+      if (!frame)
+        break;
+      bool accepted = false;
+      try {
+        const auto book_in_time = state_->transport.epoch_ns.load(std::memory_order_acquire);
+        const auto decode_started = state_->diag.enabled() ? sample() : Sample{};
+        accepted = handle(slot, optiq::decode(frame->view()), decode_started, book_in_time);
+      } catch (const std::invalid_argument &) {
+        // Invalid SBE framing is connection-local.
       }
-      if (received || frames != 0) {
-        if (received && connection.buffered && connection.session && state_->diag.enabled()) {
-          event("input_buffered", with_session(*connection.session)
-                    .set("buffered_bytes", connection.buffered).set("iteration", sample().iteration));
-        }
+      transport.inbound.pop();
+      ++frames;
+      if (!accepted) {
+        close_connection(slot);
         break;
       }
-      auto end = connection.input_start + connection.buffered;
-      if (end == connection.input.size()) {
-        std::memmove(connection.input.data(), connection.input.data() + connection.input_start,
-                     connection.buffered);
-        connection.input_start = 0;
-        end = connection.buffered;
-      }
-      const auto size = ::recv(connection.fd.get(), connection.input.data() + end,
-                               connection.input.size() - end, 0);
-      if (size <= 0) {
-        if (size == 0 || !app_io::retryable() ||
-            (!connection.session && Clock::now() - connection.activity > 5s))
-          disconnect(slot);
-        break;
-      }
-      connection.buffered += static_cast<std::size_t>(size);
-      received = true;
     }
     return frames;
   }
 
   std::size_t connection_capacity(std::size_t session) const {
     const auto slot = sessions_[session].active;
-    return slot == no_connection ? SIZE_MAX : connections_[slot].out.available();
+    return slot == no_connection ? SIZE_MAX : connections_[slot].transport.outbound.available();
   }
 
   std::uint32_t private_sequence(Session &identity) {
@@ -624,7 +535,7 @@ class Gateway : public Actor, public Actor::Callback {
     if (connection && connection->recovering)
       throw std::logic_error("live private reply attempted during replay");
     message.sequence = private_sequence(identity);
-    Stored stored{optiq::encode(message), message.sequence};
+    Reply stored{optiq::encode(message), message.sequence};
     if (!identity.replay.available())
       identity.replay.pop();
     identity.replay.push(stored);
@@ -688,20 +599,20 @@ class Gateway : public Actor, public Actor::Callback {
     return 1;
   }
 
-  void send_fill(const BookOrder &order, std::int64_t price, std::uint64_t quantity,
+  void send_fill(const MatchFillParty &party, const MatchFill &fill, Side side,
                  std::uint64_t trade_time) {
     Message response{};
     response.type = Template::Fill;
-    response.firm = order.firm;
-    response.order_id = order.order_id;
-    response.instrument = order.instrument;
-    response.side = order.side;
-    response.price = price;
-    response.quantity = quantity;
-    response.leaves = order.remaining;
+    response.firm = party.firm;
+    response.order_id = party.order_id;
+    response.instrument = fill.instrument;
+    response.side = side;
+    response.price = fill.price;
+    response.quantity = fill.quantity;
+    response.leaves = party.remaining;
     response.execution_id = next_execution_id_;
     response.time = trade_time;
-    send_private(order.session, response);
+    send_private(party.session, response);
   }
 
   MarketUpdate market_update(const BookChange &change) {
@@ -867,7 +778,9 @@ class Gateway : public Actor, public Actor::Callback {
         return blocked(command, "publication", plan_.changes.size());
       for (const auto &change : plan_.changes)
         updates_.push_back(market_update(change));
-      book_in_time = epoch_nanoseconds();
+      book_in_time = command.disconnect
+                         ? state_->transport.epoch_ns.load(std::memory_order_acquire)
+                         : command.book_in_time;
       const auto start = diagnostic ? Clock::now() : Clock::time_point{};
       matcher_.commit(plan_);
       if (diagnostic)
@@ -882,7 +795,8 @@ class Gateway : public Actor, public Actor::Callback {
       }
     }
     const auto applied = diagnostic ? sample() : Sample{};
-    const auto trade_time = rejection.empty() && !plan_.fills.empty() ? epoch_nanoseconds() : 0;
+    const auto trade_time = rejection.empty() && !plan_.fills.empty()
+                                ? state_->transport.epoch_ns.load(std::memory_order_acquire) : 0;
 
     if (!command.disconnect)
       send_private(command.session,
@@ -890,8 +804,8 @@ class Gateway : public Actor, public Actor::Callback {
     const auto encoded = diagnostic ? sample() : Sample{};
     if (rejection.empty()) {
       for (const auto &fill : plan_.fills) {
-        send_fill(fill.maker, fill.maker.price, fill.quantity, trade_time);
-        send_fill(fill.taker, fill.maker.price, fill.quantity, trade_time);
+        send_fill(fill.maker, fill, fill.maker_side, trade_time);
+        send_fill(fill.taker, fill, fill.taker_side, trade_time);
         if (++next_execution_id_ == UINT32_MAX)
           throw std::overflow_error("execution sequence exhausted");
       }
@@ -917,7 +831,7 @@ class Gateway : public Actor, public Actor::Callback {
     if (rejection.empty()) {
       for (const auto &fill : plan_.fills) {
         fills.push(Json::object().set("maker_order_id", fill.maker.order_id)
-                       .set("taker_order_id", fill.taker.order_id).set("price", fill.maker.price)
+                       .set("taker_order_id", fill.taker.order_id).set("price", fill.price)
                        .set("quantity", fill.quantity));
       }
     }
@@ -927,7 +841,8 @@ class Gateway : public Actor, public Actor::Callback {
     if (!rejection.empty())
       row.set("rejection_reason", rejection);
     if (!command.disconnect) {
-      row.set("stages", Json::object().set("frame_complete", command.assembled.json())
+      row.set("stages", Json::object().set("decode_started", command.decode_started.json())
+                .set("frame_complete", command.decode_started.json())
                 .set("book_applied", applied.json()).set("ack_encoded", encoded.json()));
     }
     event("command_complete", std::move(row));
@@ -976,15 +891,16 @@ class Gateway : public Actor, public Actor::Callback {
                                                     static_cast<std::uint16_t>(partition)});
       if (identity == session_indices_.end())
         throw std::invalid_argument("unknown gate session");
-      auto &session = sessions_[identity->second];
+      auto &send_gate = state_->transport.send_gates[identity->second];
       if (tag == "private_send")
-        session.allow_send = value.boolean();
+        send_gate.allow.store(value.boolean(), std::memory_order_release);
       else if (tag == "private_send_bytes")
-        session.send_bytes = value.is_null() ? std::nullopt : std::optional<std::size_t>(value.number());
+        send_gate.remaining.store(value.is_null() ? SIZE_MAX : value.number(),
+                                  std::memory_order_release);
       else if (tag == "replay_send_through") {
         if (!value.is_null() && value.number() >= UINT32_MAX)
           throw std::invalid_argument("invalid replay gate");
-        session.replay_through = value.is_null() ? std::nullopt :
+        sessions_[identity->second].replay_through = value.is_null() ? std::nullopt :
             std::optional<std::uint32_t>(static_cast<std::uint32_t>(value.number()));
       } else
         throw std::invalid_argument("unknown gate");
@@ -1064,17 +980,56 @@ class Gateway : public Actor, public Actor::Callback {
     std::erase_if(controls_, [&](auto &control) { return !serve_control(control); });
   }
 
-  void accept_connection() {
-    if (auto fd = app_io::accept(listener_); fd) {
-      auto available = std::ranges::find_if(connections_, [](const auto &c) { return !c.fd; });
-      if (available != connections_.end())
-        available->reset(std::move(fd));
+  void service_connections() {
+    // BlueZone increments this counter after publishing each new open slot.
+    // Existing slots stay in this list until the matcher retires them.
+    const auto accepted = state_->transport.accepted_connections.load(std::memory_order_acquire);
+    if (accepted != accepted_connections_) {
+      accepted_connections_ = accepted;
+      active_slots_.clear();
+      for (std::size_t i = 0; i < connections_.size(); ++i) {
+        const auto phase = connections_[i].transport.phase.load(std::memory_order_acquire);
+        if (phase == Phase::open || phase == Phase::closed)
+          active_slots_.push_back(i);
+      }
     }
+
+    std::erase_if(active_slots_, [&](std::size_t slot) {
+      auto &connection = connections_[slot];
+      auto &transport = connection.transport;
+      if (transport.phase.load(std::memory_order_acquire) == Phase::closed) {
+        disconnect(slot);
+        transport.phase.store(Phase::retired, std::memory_order_release);
+        return true;
+      }
+      if (!transport.close_requested.load(std::memory_order_relaxed)) {
+        connection.open = true;
+        attach(connection, slot);
+        stage_replay(connection);
+      }
+      return false;
+    });
+    sequence_disconnects();
+
+    if (active_slots_.empty())
+      return;
+    const auto next = std::ranges::lower_bound(active_slots_, input_start_);
+    const auto size = active_slots_.size();
+    const auto start = next == active_slots_.end() ? 0
+                                                  : static_cast<std::size_t>(next - active_slots_.begin());
+    std::size_t remaining = commands_per_turn;
+    std::size_t count = 0;
+    for (; count < size && commands_.available() && remaining; ++count) {
+      const auto slot = active_slots_[(start + count) % size];
+      remaining -= service_input(slot, std::min(remaining, order_transport::inbound_frames));
+    }
+    const auto advance = count > 0 && count < size ? count : 1;
+    input_start_ = active_slots_[(start + advance) % size];
   }
 
 public:
   explicit Gateway(const GatewayInit &init)
-      : options_(init.options), limits_(init.config.limits), state_(init.state),
+      : limits_(init.config.limits), state_(init.state),
         control_(init.options.control_path),
         matcher_(init.config.instruments, init.config.sessions.size(), limits_.book,
                  Actor::Allocator<std::byte>(getAllocator())),
@@ -1082,15 +1037,15 @@ public:
         pending_disconnects_(init.config.sessions.size()),
         reply_demand_(init.config.sessions.size()), notices_(limits_.notices),
         ready_notices_(limits_.notices), notice_batches_(limits_.notice_handoff) {
-    listener_ = app_io::listener(options_.bind_address, options_.port, state_->port);
     sessions_.reserve(init.config.sessions.size());
     for (const auto &rule : init.config.sessions) {
       session_indices_.emplace(rule.key, sessions_.size());
       sessions_.emplace_back(rule, limits_.ordinary_replay);
     }
-    connections_.reserve(sessions_.size() * 2 + 4);
-    for (std::size_t i = 0; i < sessions_.size() * 2 + 4; ++i)
-      connections_.emplace_back(limits_.reply_slots);
+    connections_.reserve(state_->transport.slots.size());
+    active_slots_.reserve(state_->transport.slots.size());
+    for (auto &slot : state_->transport.slots)
+      connections_.emplace_back(slot);
     free_notices_.reserve(notices_.size());
     for (std::size_t i = notices_.size(); i != 0; --i)
       free_notices_.push_back(i - 1);
@@ -1109,6 +1064,8 @@ public:
       if (state_->matcher_tid.load() < 0) {
         state_->matcher_cpu.store(::sched_getcpu());
         state_->matcher_tid.store(::gettid());
+        registerCallback(*this);
+        return;
       }
       if (state_->workers->market_failed()) {
         state_->fail("market subscriber lost or blocked; restart with an empty book");
@@ -1116,30 +1073,7 @@ public:
       }
       manage_controls();
       advance_notices();
-      accept_connection();
-      for (std::size_t i = 0; i < connections_.size(); ++i) {
-        auto &connection = connections_[i];
-        if (!connection.fd)
-          continue;
-        if ((connection.recovering || connection.requested || !commands_.available()) &&
-            closed_socket(connection)) {
-          disconnect(i);
-          continue;
-        }
-        attach(connection, i);
-        stage_replay(connection);
-        flush(i);
-      }
-      sequence_disconnects();
-      std::size_t remaining = commands_per_turn;
-      std::size_t count = 0;
-      for (; count < connections_.size() && commands_.available() && remaining; ++count) {
-        const auto i = (input_start_ + count) % connections_.size();
-        if (connections_[i].fd)
-          remaining -= service_input(i, std::min(remaining, frames_per_connection));
-      }
-      const auto advance = count > 0 && count < connections_.size() ? count : 1;
-      input_start_ = (input_start_ + advance) % connections_.size();
+      service_connections();
       if (!commands_.available() && !full_reported_ && state_->diag.enabled()) {
         full_reported_ = true;
         event("intake_paused", Json::object().set("reason", "command_queue_full").set("queue_depth", commands_.size()));
@@ -1150,6 +1084,9 @@ public:
         commands_.pop();
       if (commands_.available())
         full_reported_ = false;
+      const bool intake_paused = !commands_.available();
+      if (state_->transport.intake_paused.load(std::memory_order_relaxed) != intake_paused)
+        state_->transport.intake_paused.store(intake_paused, std::memory_order_release);
       registerCallback(*this);
     } catch (const std::exception &error) {
       state_->fail(error.what());
@@ -1196,7 +1133,7 @@ int run_app(const AppOptions &options, const volatile std::sig_atomic_t &stoppin
     if (::sched_setaffinity(0, sizeof(housekeeping), &housekeeping) != 0)
       throw std::runtime_error("RedZone run invalid: cannot pin supervisor thread to housekeeping");
   }
-  auto state = std::make_shared<AppState>(!options.control_path.empty());
+  auto state = std::make_shared<AppState>(config, !options.control_path.empty());
   WorkersConfig worker_options{
       options.bind_address, options.market_port, config.limits.publication,
       config.limits.notice_handoff, config.limits.notice_batch, config.limits.notices, {}};
@@ -1224,6 +1161,10 @@ int run_app(const AppOptions &options, const volatile std::sig_atomic_t &stoppin
     start.setRedZoneCore(publisher_cpu);
   }
   state->workers->add_actors(start, publisher_cpu, blue_cpu);
+  order_transport::add_actor(start, blue_cpu, options, state->transport, state->diag,
+                             [state_ptr = state.get()](std::string_view error) {
+                               state_ptr->fail(error);
+                             });
   start.addActor<Gateway>(matcher_cpu, GatewayInit{options, config, state});
   // Simplx temporarily pins the engine constructor to each worker CPU for
   // allocation and actor initialization. Keep that work off the supervisor.
@@ -1236,7 +1177,7 @@ int run_app(const AppOptions &options, const volatile std::sig_atomic_t &stoppin
   for (;;) {
     if (state->failed.load())
       throw std::runtime_error(state->error.data());
-    if (state->matcher_tid.load() > 0 &&
+    if (state->matcher_tid.load() > 0 && state->transport.tid.load() > 0 &&
         std::ranges::all_of(state->workers->placement(), [](const auto &w) { return w.thread_id > 0; }))
       break;
     if (Clock::now() > until)
@@ -1264,7 +1205,7 @@ int run_app(const AppOptions &options, const volatile std::sig_atomic_t &stoppin
     if (!file)
       throw std::runtime_error("cannot write startup placement file: " + options.placement_path);
   }
-  std::cout << "READY port=" << state->port << " market_port=" << state->workers->market_port()
+  std::cout << "READY port=" << state->transport.port << " market_port=" << state->workers->market_port()
             << " matcher_cpu=" << cores.matcher << " publisher_cpu=" << cores.publisher
             << " blue_cpu=" << cores.blue << " scheduling=" << (options.redzone ? "redzone" : "ordinary")
             << std::endl;

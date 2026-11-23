@@ -59,12 +59,22 @@ struct BookChange {
   BookOrder order;
 };
 
-// Quantity and both order states immediately after this execution. The trade
-// price is maker.price. Earlier fills are not rewritten by later fills.
+struct MatchFillParty {
+  std::uint64_t order_id{};
+  std::uint64_t remaining{};
+  std::array<char, 8> firm{};
+  std::size_t session{};
+};
+
+// Each party's remaining quantity is captured at this execution.
 struct MatchFill {
-  BookOrder maker;
-  BookOrder taker;
+  MatchFillParty maker;
+  MatchFillParty taker;
   std::uint64_t quantity{};
+  std::int64_t price{};
+  std::uint32_t instrument{};
+  Side maker_side{};
+  Side taker_side{};
 };
 
 struct MatchPlan {
@@ -278,6 +288,10 @@ private:
     return {order.instrument, order.side, order.price};
   }
 
+  static MatchFillParty fill_party(const BookOrder &order) noexcept {
+    return {order.order_id, order.remaining, order.firm, order.session};
+  }
+
   static void reject(MatchPlan &plan, std::string_view reason) noexcept {
     plan.rejection = reason;
     plan.result = {};
@@ -404,7 +418,9 @@ private:
         maker.executed += quantity;
         incoming.remaining -= quantity;
         incoming.executed += quantity;
-        plan.fills.push_back({maker, incoming, quantity});
+        plan.fills.push_back({fill_party(maker), fill_party(incoming), quantity,
+                              maker.price, maker.instrument, maker.side,
+                              incoming.side});
         if (maker.remaining == 0) {
           append_removal(plan, maker);
           if (std::next(order) == queue.end())

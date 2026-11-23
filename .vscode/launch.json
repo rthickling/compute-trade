@@ -6,7 +6,7 @@
       "type": "cppdbg",
       "request": "launch",
       "program": "${workspaceFolder}/build/debug/bin/ct_exchange",
-      "args": [],
+      "args": ["--config", "${workspaceFolder}/config/local.json"],
       "cwd": "${workspaceFolder}",
       "stopAtEntry": false,
       "externalConsole": false,

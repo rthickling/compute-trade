@@ -8,7 +8,8 @@ import sys
 from pathlib import Path
 
 
-BLUE_RESPONSIBILITIES = ("statistics", "disconnect_replay")
+LEGACY_BLUE_RESPONSIBILITIES = ("statistics", "disconnect_replay")
+BLUE_RESPONSIBILITIES = (*LEGACY_BLUE_RESPONSIBILITIES, "order_transport")
 
 
 def cpu_set(value):
@@ -123,16 +124,30 @@ def validate(manifest, events):
         require(worker["scheduler"] in (os.SCHED_FIFO, os.SCHED_RR) and worker["priority"] > 0,
                 f"CPU {cpu} worker is missing real-time scheduling")
 
-    blue_roles = BLUE_RESPONSIBILITIES
+    blue_roles = LEGACY_BLUE_RESPONSIBILITIES
     if "bluezone" in by_role:
         responsibilities = by_role["bluezone"].get("responsibilities")
+        expected = (
+            BLUE_RESPONSIBILITIES
+            if isinstance(responsibilities, list) and "order_transport" in responsibilities
+            else LEGACY_BLUE_RESPONSIBILITIES
+        )
         require(isinstance(responsibilities, list)
-                and len(responsibilities) == len(BLUE_RESPONSIBILITIES)
-                and all(role in responsibilities and role not in by_role for role in BLUE_RESPONSIBILITIES),
+                and len(responsibilities) == len(expected)
+                and all(role in responsibilities for role in expected)
+                and all(role not in by_role for role in BLUE_RESPONSIBILITIES),
                 "invalid BlueZone responsibilities")
         require(len({worker["thread_id"] for worker in (*redzone, by_role["bluezone"])}) == 3,
                 "duplicate exchange thread IDs")
         blue_roles = ("bluezone",)
+    elif "order_transport" in by_role:
+        blue_roles = BLUE_RESPONSIBILITIES
+        transport = by_role["order_transport"]
+        require(all(role in by_role and by_role[role]["thread_id"] == transport["thread_id"]
+                    and by_role[role]["cpu"] == transport["cpu"] for role in blue_roles),
+                "BlueZone aliases must identify one thread and CPU")
+        require(transport["thread_id"] not in {worker["thread_id"] for worker in redzone},
+                "duplicate exchange thread IDs")
 
     for role in (*blue_roles, "test_client", "subscriber"):
         worker = by_role[role]

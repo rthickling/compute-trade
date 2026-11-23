@@ -15,6 +15,8 @@ from tempfile import TemporaryDirectory
 from . import extensions, hardware
 from .driver import check_fields, read_json
 
+PLACEMENT_TOOL = Path(__file__).resolve().parents[2] / "tools/redzone_status.py"
+
 
 class SessionControlTest(unittest.TestCase):
     def test_replay_gap_golden_bytes(self):
@@ -123,19 +125,35 @@ class HardwareEvidenceTest(unittest.TestCase):
         result = hardware.validate(self.manifest, hardware.trace_events(self.trace))
         self.assertEqual(result["redzone_cpus"], [1, 2])
 
-    def test_single_bluezone_worker_with_both_responsibilities(self):
+    def test_single_bluezone_worker_with_current_or_legacy_responsibilities(self):
         workers = self.manifest["host"]["workers"]
         statistics, replay = workers[2:4]
-        workers[2:4] = [{
-            **statistics,
-            "role": "bluezone",
-            "responsibilities": [statistics["role"], replay["role"]],
-        }]
+        legacy = [statistics["role"], replay["role"]]
+        for responsibilities in (legacy, [*legacy, "order_transport"]):
+            with self.subTest(responsibilities=responsibilities):
+                fixture = deepcopy(self.manifest)
+                blue = fixture["host"]["workers"]
+                blue[2:4] = [{
+                    **statistics, "role": "bluezone", "responsibilities": responsibilities,
+                }]
+                result = hardware.validate(fixture, hardware.trace_events(self.trace))
+                self.assertEqual(result["redzone_cpus"], [1, 2])
+
+                blue.append({**statistics, "role": "order_transport"})
+                with self.assertRaisesRegex(ValueError, "invalid BlueZone responsibilities"):
+                    hardware.validate(fixture, hardware.trace_events(self.trace))
+
+    def test_order_transport_aliases_identify_one_placement(self):
+        workers = self.manifest["host"]["workers"]
+        statistics, replay = workers[2:4]
+        replay["thread_id"] = statistics["thread_id"]
+        transport = {**statistics, "role": "order_transport"}
+        workers.append(transport)
         result = hardware.validate(self.manifest, hardware.trace_events(self.trace))
         self.assertEqual(result["redzone_cpus"], [1, 2])
 
-        workers.append(replay)
-        with self.assertRaisesRegex(ValueError, "invalid BlueZone responsibilities"):
+        transport["thread_id"] = 999
+        with self.assertRaisesRegex(ValueError, "BlueZone aliases"):
             hardware.validate(self.manifest, hardware.trace_events(self.trace))
 
     def test_rejects_active_sibling_or_other_work(self):
@@ -179,14 +197,34 @@ class HardwareEvidenceTest(unittest.TestCase):
 
 
 class PlacementStatusTest(unittest.TestCase):
-    def test_startup_thread_must_be_absent_from_exchange_tasks(self):
-        process_id = os.getpid()
-        cpu = str(min(os.sched_getaffinity(0)))
-        tool = Path(__file__).resolve().parents[2] / "tools/redzone_status.py"
+    def test_placement_normalizes_legacy_and_current_aliases(self):
+        cpu = min(os.sched_getaffinity(0))
         with TemporaryDirectory() as directory:
             placement = Path(directory) / "workers.json"
             command = [
-                sys.executable, str(tool), "--matcher", cpu, "--publisher", cpu,
+                sys.executable, str(PLACEMENT_TOOL), "--matcher", str(cpu), "--publisher",
+                str(cpu), "--blue", str(cpu), "--placement", str(placement),
+            ]
+            legacy = ["statistics", "disconnect_replay"]
+            for responsibilities in (legacy, [*legacy, "order_transport"]):
+                with self.subTest(responsibilities=responsibilities):
+                    placement.write_text(json.dumps({
+                        "process_id": os.getpid(),
+                        "workers": [{"role": role, "cpu": cpu, "thread_id": os.getpid()}
+                                    for role in responsibilities],
+                    }))
+                    result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, 0, result)
+                    (blue,) = json.loads(result.stdout)["workers"]
+                    check_fields(blue, {"role": "bluezone", "responsibilities": responsibilities})
+
+    def test_startup_thread_must_be_absent_from_exchange_tasks(self):
+        process_id = os.getpid()
+        cpu = str(min(os.sched_getaffinity(0)))
+        with TemporaryDirectory() as directory:
+            placement = Path(directory) / "workers.json"
+            command = [
+                sys.executable, str(PLACEMENT_TOOL), "--matcher", cpu, "--publisher", cpu,
                 "--blue", cpu, "--placement", str(placement),
             ]
             stop = threading.Event()

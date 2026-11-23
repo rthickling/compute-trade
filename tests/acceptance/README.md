@@ -1,7 +1,7 @@
 # Compute Trade acceptance tests
 
-The standard CTest suite runs the existing C++ codec and book tests, the existing
-TCP integration suite, and self-tests for the independent acceptance framework.
+The standard CTest suite runs C++ matcher and Simplx event tests, Optiq startup
+checks, and self-tests for the independent acceptance framework.
 A new acceptance case starts a real exchange on ephemeral loopback ports. The
 Python client reads and writes the published wire format independently of the C++
 codec. The reference model uses a scan and sort for matching and compares
@@ -60,12 +60,12 @@ worker cores and housekeeping CPUs available to the exchange process.
 
 | Area | Automated check |
 | --- | --- |
-| Wire and framing | Independent golden bytes for supported v354 messages and session-control frames, malformed headers and groups, mandatory logon, fragmented input, coalesced requests, ordered replies, short writes and retry |
+| Wire and framing | Independent golden bytes for supported v354 messages and session-control frames, malformed headers and groups, mandatory logon, fragmented input, coalesced requests, ordered replies, short writes, retry and reconnect after a partial Ack |
 | Matching and ownership | Exact price/time order, partial fills, price sweeps, separate instruments, stale IDs, selected amendment rules, exchange-ID precedence, request reference echo, firm authorisation across sessions, and two fixed-seed tests |
 | Limits and ordering | Price and live-order capacity, atomic refusal above the sweep bound, FIFO under reply and publication pressure, full command queue and recovery |
 | Disconnect and replay | Command-order disconnect, original session provenance across firms, notices and reservations, saturated handoff, ordinary-reply eviction, retained fills, replay-before-new-work, interrupted replay and confirmation |
 | Level 3 | Reconstruct after normal commands and disconnect, compare with the matcher, and invalidate the view on a missing update |
-| Runtime | Compare the worker and actual Simplx loop counter at completed frame, match and encoded Ack. Check worker affinity and cross-core Simplx Event placement |
+| Runtime | Compare the worker and actual Simplx loop counter at decode start, match and encoded Ack. Check BlueZone socket I/O placement and the market-data Simplx Event handoff |
 | Later run evidence | Verify regenerated traces, paced-run accounting, matched experimental work, and RedZone host and trace evidence |
 
 The OEG byte fixtures correspond to
@@ -153,8 +153,9 @@ real requests through the TCP gateway.
   waiting for a slot and IDs for batches in flight.
 - `placement` returns `workers`. A worker has a `role`, `cpu` and
   `thread_id` as a Linux thread ID. Exchange roles used in the portable
-  test are `gateway_matcher`, `publisher`, `statistics`, and
-  `disconnect_replay`.
+  test are `gateway_matcher`, `publisher`, `statistics`,
+  `disconnect_replay`, and `order_transport`. The last three roles share
+  a single BlueZone thread.
 
 The injector recovery case invokes `ct_injector --replay-only` with the
 session's `--logical-access`, `--partition`, and `--firm` in addition to
@@ -175,11 +176,16 @@ confirmation, replay request and replay completion. A replay request marks
 names and the small capacity settings each test exercises.
 
 Iteration records in `command_complete.stages` are keyed by
-`frame_complete`, `book_applied` and `ack_encoded`. Each record contains
-`thread_id`, `cpu` and `iteration`, read from the actual executing worker
-and Simplx per-core loop counter. A socket write is a later operation with
-its own event when blocked. `market_event_received` records sender and receiver
-thread and CPU IDs as observed across the actual Simplx Event handoff.
+`decode_started`, `book_applied` and `ack_encoded`. The retained
+`frame_complete` key is an alias for `decode_started` on the matcher.
+Each record contains `thread_id`, `cpu` and `iteration`, read from the
+actual executing worker and Simplx per-core loop counter. When earlier work
+and output capacity permit, the three stages share one matcher iteration.
+`input_buffered`, `private_write_blocked` and `private_frame_written`
+identify the BlueZone transport thread and CPU. BlueZone emits
+`private_frame_written` after sending the final byte, including any retries.
+The test uses global event indices to order these events across cores. `market_event_received`
+records thread and CPU IDs across the actual Simplx Event handoff.
 
 ## Verify run evidence
 

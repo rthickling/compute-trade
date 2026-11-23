@@ -70,6 +70,19 @@ def case_invalid_framing_is_connection_local(exchange):
     acks(good, 104)
 
 
+def case_malformed_suffix_follows_complete_frame(exchange):
+    market = exchange.subscribe()
+    client = exchange.connect()
+    good = client.encode_new_order(199, 1, wire.SELL, 100, 1)
+    client.send(good + wire.HEADER.pack(0, 0, wire.NEW_ORDER, 0, 354))
+    entered = completed(exchange, 199)
+    departed = exchange.wait_for("command_complete", kind="disconnect", **SESSION)
+    assert departed["command_sequence"] == entered["command_sequence"] + 1
+    added, removed = market.consume(2)
+    assert (added["action"], removed["action"]) == ("add", "remove")
+    assert added["order_id"] == removed["order_id"]
+
+
 def case_logon_required(exchange):
     with exchange.raw_connection() as socket_without_logon:
         socket_without_logon.sendall(wire.new_order(105, "FIRM1", 1, wire.BUY, 100, 1))
@@ -103,7 +116,37 @@ def case_partial_output_retry(exchange):
     assert first_ack.fields["sequence"] == pending["sequence"]
     assert second_ack.fields["sequence"] == pending["sequence"] + 1
     assert first_ack.fields["order_id"] != second_ack.fields["order_id"]
+    writes = [exchange.wait_for("private_frame_written", sequence=ack.fields["sequence"], **SESSION)
+              for ack in (first_ack, second_ack)]
+    assert writes[0]["iteration"] == writes[1]["iteration"], writes
     client.expect_quiet()
+
+
+def case_partial_ack_disconnect_replays_full_frame(exchange):
+    exchange.subscribe()
+    client = exchange.connect()
+    exchange.control("gate", name="private_send_bytes", value=5, **SESSION)
+    client.new_order(108, 1, wire.SELL, 110, 1)
+    ack = exchange.wait_for("private_reply_ready", client_order_id=108, **SESSION)
+    exchange.wait_for("private_write_blocked", sequence=ack["sequence"], bytes_written=5,
+                      **SESSION)
+    read_exact(client.socket, 5)
+    client.close(reset=True)
+    exchange.wait_for("command_complete", kind="disconnect", **SESSION)
+
+    exchange.control("gate", name="private_send_bytes", value=None, **SESSION)
+    returning = exchange.connect(last_processed=0, wait=False)
+    returning.accept_logon()
+    reply, notice = returning.finish_logon()
+    assert reply.template_id == wire.ACK, reply
+    check_fields(reply.fields, {
+        "client_order_id": 108, "order_id": ack["order_id"], "sequence": ack["sequence"],
+    })
+    assert notice.template_id == wire.KILL, notice
+    check_fields(notice.fields, {"order_id": ack["order_id"], "sequence": ack["sequence"] + 1})
+    assert returning.replay_complete.fields["sequence"] == notice.fields["sequence"]
+    returning.new_order(109, 1, wire.SELL, 110, 1)
+    assert acks(returning, 109).fields["sequence"] == notice.fields["sequence"] + 1
 
 
 def case_queue_full_and_reply_blocked(exchange):
@@ -210,13 +253,13 @@ def worker_for(placement, role):
 
 def same_iteration(command, worker):
     stages = command["stages"]
-    seen = [stages[phase] for phase in ("frame_complete", "book_applied", "ack_encoded")]
+    assert stages["decode_started"] == stages["frame_complete"], stages
+    seen = [stages[phase] for phase in ("decode_started", "book_applied", "ack_encoded")]
     for sample in seen:
         assert sample["thread_id"] == worker["thread_id"], (sample, worker)
         assert sample["cpu"] == worker["cpu"], (sample, worker)
         assert type(sample["iteration"]) is int and sample["iteration"] >= 0, sample
     assert len({sample["iteration"] for sample in seen}) == 1, seen
-    return seen[0]["iteration"]
 
 
 def case_burst_yields_between_callback_turns(exchange):
@@ -229,8 +272,9 @@ def case_burst_yields_between_callback_turns(exchange):
     assert len(exchange.snapshot()["queued_command_sequences"]) == len(ids)
 
     exchange.control("gate", name="command_processing", value=True)
-    for cid in ids:
-        acks(client, cid)
+    replies = [acks(client, cid) for cid in ids]
+    assert 0 < last["book_in_time"] < (1 << 64) - 1
+    assert replies[-1].fields["book_in_time"] == last["book_in_time"]
     applied = [completed(exchange, cid) for cid in ids]
     assert [command["command_sequence"] for command in applied] == list(
         range(last["command_sequence"] - len(ids) + 1, last["command_sequence"] + 1)
@@ -245,16 +289,26 @@ def case_actual_simplx_iteration(exchange):
     exchange.subscribe()
     placement = exchange.control("placement")
     worker = worker_for(placement, "gateway_matcher")
+    transport = worker_for(placement, "order_transport")
+    transport_identity = {field: transport[field] for field in ("thread_id", "cpu")}
+    assert transport["thread_id"] != worker["thread_id"]
+    assert transport["cpu"] != worker["cpu"]
     seller, buyer = exchange.connect(), exchange.connect(access=2)
 
     frame = seller.encode_new_order(150, 1, wire.SELL, 100, 2)
     seller.send(frame[:-1])
     incomplete = exchange.wait_for("input_buffered", buffered_bytes=len(frame) - 1, **SESSION)
+    check_fields(incomplete, transport_identity)
+    assert exchange.snapshot()["orders"] == []
     seller.send(frame[-1:])
-    acks(seller, 150)
+    resting_ack = acks(seller, 150)
     resting = completed(exchange, 150)
     assert resting["fills"] == []
-    assert same_iteration(resting, worker) > incomplete["iteration"]
+    assert incomplete["event_index"] < resting["event_index"]
+    same_iteration(resting, worker)
+    delivered = exchange.wait_for("private_frame_written", sequence=resting_ack.fields["sequence"],
+                                  **SESSION)
+    check_fields(delivered, transport_identity)
 
     buyer.new_order(151, 1, wire.BUY, 100, 2)
     full_ack = acks(buyer, 151)
@@ -273,9 +327,15 @@ def case_actual_simplx_iteration(exchange):
     assert [fill["quantity"] for fill in partial["fills"]] == [1]
     assert [row["remaining"] for row in exchange.snapshot()["orders"]] == [1]
     same_iteration(partial, worker)
+    blocked = exchange.wait_for("private_write_blocked", bytes_written=0, **OTHER)
+    check_fields(blocked, transport_identity)
     buyer.expect_quiet()
     exchange.control("gate", name="private_send", value=True, **OTHER)
-    acks(buyer, 153)
+    partial_ack = acks(buyer, 153)
+    delivered = exchange.wait_for("private_frame_written", sequence=partial_ack.fields["sequence"],
+                                  **OTHER)
+    check_fields(delivered, transport_identity)
+    assert blocked["event_index"] < delivered["event_index"]
 
 
 def case_private_fills_and_replay(exchange):
@@ -410,9 +470,11 @@ def case_worker_placement_and_event_handoff(exchange):
         assert set(os.sched_getaffinity(worker["thread_id"])) == {worker["cpu"]}, worker
     reserved_physical = {physical_core(cpu) for cpu in red_cpu_set}
     assert len(reserved_physical) == 2, core_roles
-    for role in ("statistics", "disconnect_replay"):
+    blue = worker_for(placement, "order_transport")
+    for role in ("statistics", "disconnect_replay", "order_transport"):
         worker = worker_for(placement, role)
         cpus = os.sched_getaffinity(worker["thread_id"])
+        assert worker["thread_id"] == blue["thread_id"]
         assert worker["cpu"] in cpus
         assert all(physical_core(cpu) not in reserved_physical for cpu in cpus), worker
 
@@ -434,8 +496,12 @@ def case_worker_placement_and_event_handoff(exchange):
 CASES = {
     "fragmented_and_coalesced": (case_fragmented_and_coalesced, {}),
     "invalid_framing_is_connection_local": (case_invalid_framing_is_connection_local, {}),
+    "malformed_suffix_follows_complete_frame": (case_malformed_suffix_follows_complete_frame, {}),
     "logon_required": (case_logon_required, {}),
     "partial_output_retry": (case_partial_output_retry, {}),
+    "partial_ack_disconnect_replays_full_frame": (
+        case_partial_ack_disconnect_replays_full_frame, {"reply_slots_per_session": 1},
+    ),
     "queue_full_and_reply_blocked": (case_queue_full_and_reply_blocked, {
         "reply_slots_per_session": 1, "command_queue_capacity": 2,
     }),

@@ -30,8 +30,8 @@ ctest --test-dir build/acceptance --output-on-failure
 
 The application needs three allowed physical cores. The tests launch
 ordinary pinned workers and ephemeral loopback sockets. Allow a few seconds
-for the test run after the build. The `debug` and `release` presets run component
-checks, the original socket suite, and framework self-tests. The
+for the test run after the build. The `debug` and `release` presets run matcher,
+Simplx, and Optiq startup checks along with framework self-tests. The
 `acceptance` preset adds the live Optiq scenarios. See the
 [acceptance guide](tests/acceptance/README.md) for individual scenarios and
 evidence validators.
@@ -50,16 +50,10 @@ The Optiq subset codec is maintained in
 [`optiq.hpp`](include/compute_trade/optiq.hpp). The wire oracle uses
 independent fixtures derived from the
 [published v354 XML](https://connect.euronext.com/sites/default/files/it-documentation/oeg_binary_sbe_input_354.xml).
-The earlier Compute Trade SBE schema and its generated headers remain for
-the original compatibility mode. Regenerate those with
-`python3 tools/generate_sbe.py` and check with
-`python3 tools/generate_sbe.py --check`. Both commands require Java 17 or
-newer when regenerating. Use `--jar` for an offline copy of the pinned
-1.41.0 generator.
 
 ## Run
 
-Start the exchange from the repository root with the sample configuration.
+Start the exchange from the repository root and pass its configuration file.
 
 ```sh
 ./build/acceptance/bin/ct_exchange --config config/local.json
@@ -68,7 +62,7 @@ Start the exchange from the repository root with the sample configuration.
 The READY line reports the TCP ports, the worker CPUs and the scheduling
 mode. The defaults are loopback ports 9000 for order entry and 9001 for
 market data. Start the subscriber in another terminal and wait for its
-ready message, then start a configured injector.
+ready message, then select a configured injector session with `--logical-access`.
 
 ```sh
 python3 tools/market_subscriber.py --port 9001
@@ -78,6 +72,9 @@ python3 tools/market_subscriber.py --port 9001
 ./build/acceptance/bin/ct_injector --port 9000 \
   --logical-access 1 --partition 1 --firm FIRM1 --count 10
 ```
+
+`just exchange` and `just inject` build and run the release exchange and
+injector with the sample configuration and session.
 
 Orders match or rest and the subscriber prints the resulting updates.
 An injector disconnect cancels its live orders and publishes those removals.
@@ -105,7 +102,3 @@ just redzone-subscribe
 just redzone-placement
 just redzone-stop            # or: just redzone-reboot
 ```
-
-The original TCP protocol remains available when the exchange is started
-without `--config`. Start the injector without `--logical-access` for that
-mode. This preserves the earlier development and test workflow.

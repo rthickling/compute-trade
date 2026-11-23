@@ -4,6 +4,7 @@
 #include <netinet/tcp.h>
 #include <sched.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -49,10 +50,12 @@ bool would_retry() noexcept {
     return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
 }
 
-struct MarketSlot {
+// The matcher writes a slot while the publisher can read the adjacent slot.
+struct alignas(64) MarketSlot {
     MarketUpdate update;
     std::uint64_t command_sequence;
 };
+static_assert(sizeof(MarketSlot) == 64);
 
 struct MarketEvent : Actor::Event {
     std::uint64_t first;
@@ -249,6 +252,7 @@ public:
     }
 
 private:
+    static constexpr std::size_t max_send_lines = 32;
     static constexpr std::string_view ready_message = "{\"type\":\"ready\",\"sequence\":0}\n";
     static constexpr std::string_view subscribe_message = "{\"type\":\"subscribe\"}";
 
@@ -335,23 +339,55 @@ private:
     }
 
     void drain_updates() noexcept {
-        if (event_head_ == event_tail_)
-            return;
-        const auto visible = std::min(event_tail_, state_.market_published.load(std::memory_order_acquire));
-        for (unsigned work = 0; work < 32 && event_head_ < visible; ++work) {
-            if (!sent_)
-                line_.encode(state_.market[event_head_ % state_.market.size()], event_head_ + 1);
-            if (!send_some(line_.view())) {
-                if (closed_ || (blocked_since_ && Clock::now() - *blocked_since_ > std::chrono::seconds(30))) {
-                    client_.reset();
-                    state_.market_broken.store(true, std::memory_order_release);
-                } else if (!blocked_since_) {
-                    blocked_since_ = Clock::now();
-                }
+        if (batch_head_ == batch_size_) {
+            if (event_head_ == event_tail_)
                 return;
+            const auto published = state_.market_published.load(std::memory_order_acquire);
+            const auto visible = std::min(event_tail_, published);
+            batch_head_ = 0;
+            batch_size_ = std::min<std::uint64_t>(visible - event_head_, lines_.size());
+            for (std::size_t i = 0; i < batch_size_; ++i) {
+                const auto index = event_head_ + i;
+                lines_[i].encode(state_.market[index % state_.market.size()], index + 1);
             }
-            blocked_since_.reset();
-            state_.market_read.store(++event_head_, std::memory_order_release);
+            if (batch_size_ == 0)
+                return;
+        }
+
+        std::array<iovec, max_send_lines> buffers;
+        for (std::size_t i = batch_head_; i < batch_size_; ++i) {
+            auto line = lines_[i].view();
+            if (i == batch_head_)
+                line.remove_prefix(sent_);
+            buffers[i - batch_head_] = {const_cast<char *>(line.data()), line.size()};
+        }
+        msghdr message{};
+        message.msg_iov = buffers.data();
+        message.msg_iovlen = batch_size_ - batch_head_;
+        const auto count = ::sendmsg(client_.get(), &message, MSG_NOSIGNAL);
+        if (count <= 0) {
+            const bool closed = count == 0 || !would_retry();
+            const auto now = Clock::now();
+            if (closed || (blocked_since_ && now - *blocked_since_ > std::chrono::seconds(30))) {
+                client_.reset();
+                state_.market_broken.store(true, std::memory_order_release);
+            } else if (!blocked_since_) {
+                blocked_since_ = now;
+            }
+            return;
+        }
+
+        blocked_since_.reset();
+        auto sent = static_cast<std::size_t>(count) + sent_;
+        const auto initial_head = batch_head_;
+        while (batch_head_ < batch_size_ && sent >= lines_[batch_head_].view().size()) {
+            sent -= lines_[batch_head_].view().size();
+            ++batch_head_;
+        }
+        sent_ = sent;
+        if (batch_head_ != initial_head) {
+            event_head_ += batch_head_ - initial_head;
+            state_.market_read.store(event_head_, std::memory_order_release);
         }
     }
 
@@ -365,7 +401,9 @@ private:
     std::uint64_t event_tail_{};
     Clock::time_point handshake_started_{};
     std::optional<Clock::time_point> blocked_since_;
-    MarketLine line_;
+    std::array<MarketLine, max_send_lines> lines_;
+    std::size_t batch_head_{};
+    std::size_t batch_size_{};
     bool identified_{};
     bool ready_{};
     bool subscribed_{};

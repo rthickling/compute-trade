@@ -1,12 +1,36 @@
 # RedZone operation on Linux
 
 The configured exchange uses two RedZone physical cores and keeps every other
-core for general-purpose work. The matcher completes frame assembly, decode,
-book changes and acknowledgement encoding on one Simplx worker. The publisher
-owns the market-data socket on the second. BlueZone copies disconnect notices
-and samples statistics on a housekeeping CPU under ordinary Linux scheduling.
+core for general-purpose work. The matcher reads complete SBE buffers, applies
+book changes and writes SBE acknowledgement bytes on one Simplx worker. With
+no earlier work or backpressure, those stages run in one Simplx iteration.
+BlueZone owns the order-entry TCP listener, accepts connections, assembles
+incoming frames and sends private replies. It also samples the clock for wire
+timestamps, copies disconnect notices and samples statistics under ordinary
+Linux scheduling. The publisher owns the separate market-data socket on the
+second RedZone core.
 With `--redzone`, Simplx requests real-time FIFO scheduling for the matcher
 and publisher. Ordinary scheduling is suitable for correctness tests.
+
+Order-entry input and output cross the core boundary in bounded buffers.
+A private reply holds its slot until BlueZone sends its final byte. A close
+is sequenced after already admitted work. BlueZone retires the old socket
+and its pending writes before its slot can carry another connection.
+BlueZone polls the listener and active order sockets together, then services
+ready connections with bounded read and write work. The Simplx loop stays
+nonblocking so the colocated notice worker can continue to run.
+
+The publisher sends ordered JSON updates to one subscriber, batching up to
+32 lines in a socket write. A partially written line retains its publication
+slot. Insufficient publication credit makes the FIFO head wait. If delivery
+fails after subscription, the exchange stops so the next run can start with
+an empty book and a fresh subscriber.
+
+Book IN Time takes the latest BlueZone UTC sample at matcher entry and
+keeps it if the command waits for capacity. Trade Time takes the latest
+sample after commit. These wire timestamps approximate the event time and
+can repeat or follow a correction to the system clock. Private and market
+sequence numbers supply ordering.
 
 ## Choose CPUs
 
@@ -175,10 +199,10 @@ python3 tools/redzone_status.py --strict --matcher "$matcher_cpu" \
 A nonzero result identifies an invalid configuration or a placement file
 whose thread IDs fail verification. The verifier checks that the workers
 belong to the running process and that the startup thread has exited. The
-`bluezone` row lists both responsibilities of its single thread. BlueZone
-samples statistics and copies disconnect notices. The gateway handles
-replay framing and TCP delivery. The recipe writes the verified report to
-`build/redzone/placement.json`.
+`bluezone` row lists order transport, statistics and disconnect notice
+copying as responsibilities of its single thread. The matcher prepares
+replay frames and BlueZone sends them. The recipe writes the verified
+report to `build/redzone/placement.json`.
 
 Capture scheduler and interrupt activity separately, beginning before
 exchange startup and continuing during the loaded run. In a separate

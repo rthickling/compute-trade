@@ -50,6 +50,40 @@ void rejecting_an_oversized_sweep_avoids_partial_execution() {
   CHECK(plan.fills[0].maker.order_id == first);
 }
 
+void fills_keep_each_execution_quantity_and_party() {
+  Matcher book({2}, 3, {});
+  auto plan = book.make_plan();
+  auto first_order = make_order(0, Side::Sell, 100, 1);
+  first_order.instrument = 2;
+  auto second_order = make_order(1, Side::Sell, 101, 4);
+  second_order.instrument = 2;
+  second_order.firm = other_firm;
+  const auto first = execute(book, plan, first_order);
+  const auto second = execute(book, plan, second_order);
+
+  auto crossing = make_order(2, Side::Buy, 105, 3);
+  crossing.instrument = 2;
+  const auto taker = execute(book, plan, crossing);
+  CHECK(plan.fills.size() == 2);
+  for (const auto &fill : plan.fills) {
+    CHECK(fill.instrument == 2);
+    CHECK(fill.maker_side == Side::Sell && fill.taker_side == Side::Buy);
+    CHECK(fill.taker.session == 2 && fill.taker.firm == firm);
+    CHECK(fill.taker.order_id == taker);
+  }
+  const auto &early = plan.fills[0];
+  CHECK(early.price == 100 && early.quantity == 1);
+  CHECK(early.maker.order_id == first && early.maker.remaining == 0);
+  CHECK(early.maker.session == 0 && early.maker.firm == firm);
+  CHECK(early.taker.remaining == 2);
+
+  const auto &late = plan.fills[1];
+  CHECK(late.price == 101 && late.quantity == 2);
+  CHECK(late.maker.order_id == second && late.maker.remaining == 2);
+  CHECK(late.maker.session == 1 && late.maker.firm == other_firm);
+  CHECK(late.taker.remaining == 0);
+}
+
 void a_cross_reuses_capacity_from_removed_makers() {
   Matcher book({1}, 2,
                {.live_orders_total = 1, .live_orders_per_session = 1,
@@ -212,6 +246,7 @@ void failed_staging_leaves_makers_and_index_intact() {
 int main() {
   try {
     rejecting_an_oversized_sweep_avoids_partial_execution();
+    fills_keep_each_execution_quantity_and_party();
     a_cross_reuses_capacity_from_removed_makers();
     a_reprice_uses_the_origin_reservation();
     disconnect_keeps_origin_id_order_after_fills_and_amendments();

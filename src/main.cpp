@@ -1,13 +1,10 @@
-#include "compute_trade/exchange.hpp"
 #include "compute_trade/app.hpp"
 
 #include <charconv>
-#include <chrono>
 #include <csignal>
 #include <iostream>
 #include <stdexcept>
 #include <string_view>
-#include <thread>
 
 namespace {
 volatile std::sig_atomic_t stopping = 0;
@@ -25,18 +22,15 @@ unsigned number(std::string_view value, unsigned maximum) {
 
 int main(int argc, char **argv) {
   try {
-    compute_trade::ExchangeConfig config;
     compute_trade::AppOptions app;
-    config.core = compute_trade::first_allowed_core();
     for (int i = 1; i < argc; ++i) {
       const std::string_view option(argv[i]);
       if (option == "--help") {
         std::cout
-            << "Usage: ct_exchange [--core CPU] [--bind IPv4] [--port PORT]\n"
-               "Default: first allowed CPU, 127.0.0.1:9000; instruments 1 and "
-               "2.\n"
-               "Optiq mode: --config FILE [--market-port PORT] "
-               "[--publisher-core CPU] [--blue-core CPU] [--redzone]\n"
+            << "Usage: ct_exchange --config FILE [--bind IPv4] [--port PORT]\n"
+               "                   [--market-port PORT] [--core CPU]\n"
+               "                   [--publisher-core CPU] [--blue-core CPU] [--redzone]\n"
+               "Default listeners: 127.0.0.1:9000 for order entry, 127.0.0.1:9001 for market data.\n"
                "Startup placement: --placement-file FILE\n"
                "Ordinary testing only: --acceptance-control PATH\n";
         return 0;
@@ -48,13 +42,12 @@ int main(int argc, char **argv) {
       if (i + 1 == argc)
         throw std::invalid_argument("missing option value");
       const std::string_view value(argv[++i]);
-      if (option == "--core") {
-        config.core = number(value, 255);
-        app.core = static_cast<int>(config.core);
-      } else if (option == "--port")
-        config.port = static_cast<std::uint16_t>(number(value, 65535));
+      if (option == "--core")
+        app.core = static_cast<int>(number(value, 255));
+      else if (option == "--port")
+        app.port = static_cast<std::uint16_t>(number(value, 65535));
       else if (option == "--bind")
-        config.bind_address = value;
+        app.bind_address = value;
       else if (option == "--config")
         app.config = value;
       else if (option == "--market-port")
@@ -70,26 +63,11 @@ int main(int argc, char **argv) {
       else
         throw std::invalid_argument("unknown option: " + std::string(option));
     }
+    if (app.config.empty())
+      throw std::invalid_argument("--config FILE is required");
     std::signal(SIGINT, stop);
     std::signal(SIGTERM, stop);
-    if (!app.config.empty()) {
-      app.bind_address = config.bind_address;
-      app.port = config.port;
-      return compute_trade::run_app(app, stopping);
-    }
-    if (app.redzone || app.publisher_core >= 0 || app.blue_core >= 0 ||
-        !app.control_path.empty() || !app.placement_path.empty() || app.market_port != 9001)
-      throw std::invalid_argument("Optiq mode requires --config");
-    compute_trade::Exchange exchange(config);
-    const auto placement = exchange.placement();
-    std::cout << "READY port=" << exchange.port() << " core=" << placement.core
-              << " oeg_cpu=" << placement.oeg_cpu
-              << " matching_cpu=" << placement.matching_cpu << std::endl;
-    while (!stopping && !exchange.failed())
-      std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    if (exchange.failed())
-      throw std::runtime_error(exchange.error());
-    return 0;
+    return compute_trade::run_app(app, stopping);
   } catch (const std::exception &error) {
     std::cerr << "ct_exchange: " << error.what() << '\n';
     return 1;

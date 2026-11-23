@@ -58,14 +58,14 @@ close the stream without a reply.
 
 ## Sequencing, publication and memory
 
-The gateway and matcher run on one Simplx event loop. The gateway accepts
-at most one new connection per callback and rotates the first connection
-polled. In a callback it can assemble at most one complete frame per
-connection, in order, and appends the command to a bounded FIFO. A detected
-connection close takes a place in the same ordering. Under available
-capacity the global command number, matching and full encoded Ack are
-produced in the callback that finishes reading the frame. Socket writes
-are subsequent operations with independent partial-write state.
+BlueZone owns the order-entry sockets and hands complete SBE frames to
+the matcher through bounded queues. The matcher decodes up to four frames
+per connection and 32 frames per callback, rotating which connection
+it serves first. A detected close is sequenced behind commands already
+admitted to the global FIFO. With no earlier work or backpressure, the
+matcher decodes the frame, applies the order, and encodes the complete Ack
+in one Simplx iteration. BlueZone handles partial TCP writes and frees
+each reply slot after sending its final byte.
 
 The matcher plans exact book and output changes before applying them. It
 checks live order, price and sweep limits, notice reservations, complete

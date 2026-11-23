@@ -17,18 +17,23 @@ test mode="debug": (build mode)
 
 check: (test "debug") (test "release")
 
-# Pass an optional logical CPU ID; empty selects the first CPU allowed by affinity.
+# Pass an optional matcher CPU ID; empty lets the exchange choose worker cores.
 [positional-arguments]
-exchange core="" mode="release": (build mode)
+exchange core="" mode="release" config="config/local.json": (build mode)
     #!/usr/bin/env bash
     set -euo pipefail
+    args=(--config "$3")
     if [[ -n "$1" ]]; then
-        exec "./build/$2/bin/ct_exchange" --core "$1"
+        args+=(--core "$1")
     fi
-    exec "./build/$2/bin/ct_exchange"
+    exec "./build/$2/bin/ct_exchange" "${args[@]}"
 
-inject count="1000" window="1" price="10000" mode="release": (build mode)
-    "./build/{{ mode }}/bin/ct_injector" --count "{{ count }}" --window "{{ window }}" --price "{{ price }}"
+[positional-arguments]
+inject count="1000" window="1" price="10000" mode="release" logical_access="1" partition="1" firm="FIRM1": (build mode)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec "./build/$4/bin/ct_injector" --logical-access "$5" --partition "$6" --firm "$7" \
+        --count "$1" --window "$2" --price "$3"
 
 # Values for recipe argument `mode` (bash completion via `_completion_mode`).
 [private]
