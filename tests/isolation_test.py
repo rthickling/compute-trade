@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""RedZone scheduling checks. Skips with status 77 unless isolated CPUs and RT priority are available."""
+"""RedZone scheduling checks. Skips with status 77 when isolated CPUs or realtime priority are unavailable."""
 
 import json
 import os
@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from acceptance import wire
-from acceptance.driver import Session
+from acceptance.driver import Session, Subscriber
 
 SKIP = 77
 
@@ -40,6 +40,30 @@ def read_ready(process, timeout):
     return None, "".join(output) + (process.stdout.read() or "")
 
 
+
+def stop_exchange(process):
+    """Stop the exchange without hiding the test failure.
+
+    A RedZone matcher spins at SCHED_FIFO on an isolated core, so SIGINT can
+    sit pending on that thread. Kill the process, and keep any wait timeout
+    inside this function.
+    """
+    if process.poll() is not None:
+        return
+    process.kill()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            print("exchange process did not exit after SIGKILL", file=sys.stderr)
+
+
 def main():
     if len(sys.argv) != 2:
         raise SystemExit("Usage: isolation_test.py EXCHANGE_EXECUTABLE")
@@ -59,6 +83,7 @@ def main():
              "--blue-core", str(layout["blue"]),
              "--redzone", "--placement-file", str(placement)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            start_new_session=True,
         )
         try:
             ready, output = read_ready(process, 10)
@@ -83,21 +108,22 @@ def main():
             assert os.sched_getaffinity(blue["thread_id"]) == {layout["blue"]}, blue
             assert layout["blue"] not in set(layout["isolated_now"])
 
+            # A resting order is held until the market feed can publish it.
+            subscriber = Subscriber(socket.create_connection(
+                ("127.0.0.1", int(fields["market_port"])), timeout=5))
             session = Session(socket.create_connection(("127.0.0.1", int(fields["port"])), timeout=5))
             session.send(wire.logon(1, 1, 0))
             session.finish_logon()
             session.new_order(1, 1, wire.SELL, 100, 1)
             acknowledgement = session.reply(1)
             assert acknowledgement.template_id == wire.ACK, acknowledgement
+            published = subscriber.read()
+            assert published["action"] == "add", published
+            assert published["order_id"] == acknowledgement.fields["order_id"]
             session.close()
+            subscriber.close()
         finally:
-            if process.poll() is None:
-                process.send_signal(signal.SIGINT)
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
+            stop_exchange(process)
 
 
 if __name__ == "__main__":

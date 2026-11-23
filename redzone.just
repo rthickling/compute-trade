@@ -155,11 +155,11 @@ redzone-reboot: redzone-stop
     exec sudo reboot
 
 # Scheduling and affinity checks. Requires isolated CPUs and permission to use SCHED_FIFO.
-# `just test` registers the same script and skips it when either is unavailable.
+# `just test` runs this under sudo when isolated CPUs are present.
 test-isolation mode="debug":
     #!/usr/bin/env bash
     set -euo pipefail
     just build "{{ mode }}"
     exec sudo systemd-run --wait --pipe --collect --uid="$(id -u)" --gid="$(id -g)" \
-        -p LimitRTPRIO=10 --working-directory="$PWD" \
+        -p LimitRTPRIO=10 -p TimeoutStopSec=5s --working-directory="$PWD" \
         python3 tests/isolation_test.py "$PWD/build/{{ mode }}/bin/ct_exchange"

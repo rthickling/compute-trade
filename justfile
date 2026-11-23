@@ -13,7 +13,18 @@ build mode="debug": (configure mode)
     cmake --build --preset "{{ mode }}" --parallel
 
 test mode="debug": (build mode)
-    ctest --preset "{{ mode }}"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # The isolation test needs SCHED_FIFO. Ask for that permission here, in the
+    # terminal, instead of letting ctest skip the test inside a captured process.
+    if [[ -s /sys/devices/system/cpu/isolated ]]; then
+        ctest --preset "{{ mode }}" -E '^redzone_isolation$'
+        sudo systemd-run --wait --pipe --collect --uid="$(id -u)" --gid="$(id -g)" \
+            -p LimitRTPRIO=10 -p TimeoutStopSec=5s --working-directory="$PWD" \
+            python3 tests/isolation_test.py "$PWD/build/{{ mode }}/bin/ct_exchange"
+    else
+        ctest --preset "{{ mode }}"
+    fi
 
 check: (test "debug") (test "release")
 
