@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import socket
+import struct
 import sys
 
 FIELDS = ("instrument", "order_id", "side", "price", "remaining", "priority")
@@ -45,16 +46,37 @@ class Level3:
                                        row["priority"], row["order_id"]))
 
 
-def read_record(stream):
-    line = stream.readline(513)
-    if not line:
+def read_exact(stream, size):
+    data = stream.read(size)
+    if len(data) != size:
         raise EOFError("publisher closed the stream")
-    if not line.endswith(b"\n") or len(line) > 512:
-        raise ValueError("invalid market record length")
-    value = json.loads(line)
-    if not isinstance(value, dict):
-        raise TypeError("market record must be an object")
-    return value
+    return data
+
+
+HEADER = struct.Struct("<5H")
+UPDATE = struct.Struct("<QQBIQBqQQ")
+SUBSCRIBE = HEADER.pack(10, 0, 1, 2, 1)
+
+
+def read_record(stream):
+    size, block, template, schema, version = HEADER.unpack(read_exact(stream, HEADER.size))
+    if (schema, version) != (2, 1) or size != HEADER.size + block:
+        raise ValueError("invalid market SBE header")
+    if (template, block) == (2, 8):
+        return {"type": "ready", "sequence": struct.unpack("<Q", read_exact(stream, block))[0]}
+    if (template, block) != (3, UPDATE.size):
+        raise ValueError("unexpected market SBE template or block length")
+    sequence, command, action, instrument, order_id, side, price, remaining, priority = (
+        UPDATE.unpack(read_exact(stream, block))
+    )
+    if action >= 3:
+        raise ValueError("invalid market update action")
+    return {
+        "sequence": sequence, "command_sequence": command,
+        "action": ("add", "modify", "remove")[action], "instrument": instrument,
+        "order_id": order_id, "side": side, "price": price,
+        "remaining": remaining, "priority": priority,
+    }
 
 
 def main():
@@ -69,7 +91,7 @@ def main():
     book = Level3()
     try:
         with socket.create_connection((args.host, args.port), timeout=5) as connection:
-            connection.sendall(b'{"type":"subscribe"}\n')
+            connection.sendall(SUBSCRIBE)
             with connection.makefile("rb") as stream:
                 if read_record(stream) != {"type": "ready", "sequence": 0}:
                     raise ValueError("publisher did not confirm an empty stream")

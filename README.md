@@ -5,7 +5,8 @@ IDs identify separate GPU models. The exchange supports visible limit orders,
 cancellation, and cancel-replace over TCP using a subset of Optiq OEG SBE v354.
 It matches at the best eligible price and in FIFO order within that price.
 Trades execute at the resting order's price. The market data stream publishes
-order-level changes and a subscriber can reconstruct the Level 3 book.
+order-level changes using a [demo SBE schema](schema/market-data.xml) over TCP.
+A subscriber can reconstruct the Level 3 book.
 
 The exchange is for local experimentation. Session identities and permitted
 firms come from its startup configuration. Access to the loopback listener is

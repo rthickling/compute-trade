@@ -7,8 +7,8 @@ no earlier work or backpressure, those stages run in one Simplx iteration.
 BlueZone owns the order-entry TCP listener, accepts connections, assembles
 incoming frames and sends private replies. It also samples the clock for wire
 timestamps, copies disconnect notices and samples statistics under ordinary
-Linux scheduling. The publisher owns the separate market-data socket on the
-second RedZone core.
+Linux scheduling. The publisher on the second RedZone core encodes SBE
+market-data frames. A separate actor on BlueZone owns the market-data socket.
 With `--redzone`, Simplx requests real-time FIFO scheduling for the matcher
 and publisher. Ordinary scheduling is suitable for correctness tests.
 
@@ -20,8 +20,8 @@ BlueZone polls the listener and active order sockets together, then services
 ready connections with bounded read and write work. The Simplx loop stays
 nonblocking so the colocated notice worker can continue to run.
 
-The publisher sends ordered JSON updates to one subscriber, batching up to
-32 lines in a socket write. A partially written line retains its publication
+The publisher hands encoded binary frames to BlueZone in sequence. BlueZone
+sends up to 32 frames in a socket write. A partially written frame retains its publication
 slot. Insufficient publication credit makes the FIFO head wait. If delivery
 fails after subscription, the exchange stops so the next run can start with
 an empty book and a fresh subscriber.

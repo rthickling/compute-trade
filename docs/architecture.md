@@ -76,9 +76,10 @@ Intake pauses if the command queue fills. Private writes with no progress for
 becomes ready, or blocking publication for 30 seconds, invalidates the
 market view and ends the run.
 
-The publisher owns its own socket. The matching worker sends immutable
-update batches through Simplx Events and the publisher assigns consecutive
-market sequence numbers. Each update contains the command number, action,
+The matching worker sends immutable update batches through Simplx Events.
+The RedZone publisher assigns consecutive market sequence numbers, encodes
+the [demo SBE market-data schema](../schema/market-data.xml), and publishes
+the encoded slots to the BlueZone socket actor. Each update contains the command number, action,
 instrument, order ID, side, price, remaining quantity, and priority.
 The subscriber connects before the first order and receives its ready
 message before building the book from an empty state. A missing market

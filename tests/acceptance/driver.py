@@ -190,22 +190,26 @@ class Session:
 class Subscriber:
     def __init__(self, sock):
         self.socket = sock
-        self.stream = sock.makefile("rb")
         try:
-            self.socket.sendall(json_line({"type": "subscribe"}))
-            check_fields(read_json(self.stream), {"type": "ready", "sequence": 0})
+            self.socket.sendall(bytes.fromhex("0a000000010002000100"))
+            assert read_exact(sock, 18) == bytes.fromhex("120008000200020001000000000000000000")
         except BaseException:
             self.close()
             raise
 
     def close(self):
-        try:
-            self.stream.close()
-        finally:
-            self.socket.close()
+        self.socket.close()
 
     def read(self):
-        return read_json(self.stream)
+        frame = read_exact(self.socket, 64)
+        assert frame[:10] == bytes.fromhex("40003600030002000100"), frame
+        sequence, command, action, instrument, order, side, price, remaining, priority = (
+            struct.unpack_from("<QQBIQBqQQ", frame, 10)
+        )
+        assert action < 3, frame
+        return dict(sequence=sequence, command_sequence=command,
+                    action=("add", "modify", "remove")[action], instrument=instrument,
+                    order_id=order, side=side, price=price, remaining=remaining, priority=priority)
 
     def consume(self, count):
         return [self.read() for _ in range(count)]

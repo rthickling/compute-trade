@@ -112,9 +112,12 @@ completion. A gap marks those order outcomes unknown for the client. The client
 can confirm the largest sequence it accounted for and skip duplicate sequences
 after interruption.
 
-For market data the independent client sends `{"type":"subscribe"}` followed
-by a newline over the market TCP port before sending orders. It receives
-`{"type":"ready","sequence":0}` followed by JSON lines with
+For market data the independent client sends a binary Subscribe (template 1)
+over the market TCP port before sending orders. The exchange responds with
+Ready (2), with sequence zero, followed by BookUpdate (3) frames from the
+[market-data SBE schema](../../schema/market-data.xml). Each frame starts with a
+little-endian 16-bit length including the prefix and the eight-byte SBE
+header. The 64-byte BookUpdate frames carry
 `sequence`, `command_sequence`, `action` (add, modify, remove), `instrument`,
 `order_id`, `side`, `price`, `remaining` and `priority`. Sequence starts
 at one across the stream. Removal reports remaining quantity zero. An amend

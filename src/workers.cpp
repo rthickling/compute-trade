@@ -1,4 +1,5 @@
 #include "compute_trade/workers.hpp"
+#include "market_wire.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/tcp.h>
@@ -10,7 +11,6 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
-#include <charconv>
 #include <chrono>
 #include <stdexcept>
 #include <system_error>
@@ -89,55 +89,6 @@ struct RetainedNotice {
     std::atomic<bool> available{false};
 };
 
-class MarketLine {
-public:
-    static constexpr std::size_t capacity = 384;
-
-    void append(std::string_view text) noexcept {
-        std::copy(text.begin(), text.end(),
-                  buffer_.begin() + static_cast<std::ptrdiff_t>(size_));
-        size_ += text.size();
-    }
-
-    template <class Integer>
-    void number(Integer value) noexcept {
-        const auto result = std::to_chars(buffer_.data() + size_, buffer_.data() + buffer_.size(), value);
-        // The fixed layout and the ranges of the numeric fields fit the buffer.
-        size_ = static_cast<std::size_t>(result.ptr - buffer_.data());
-    }
-
-    void encode(const MarketSlot &record, std::uint64_t sequence) noexcept {
-        size_ = 0;
-        const auto &order = record.update;
-        append("{\"sequence\":");
-        number(sequence);
-        append(",\"command_sequence\":");
-        number(record.command_sequence);
-        append(",\"action\":\"");
-        const std::array<std::string_view, 3> actions{"add", "modify", "remove"};
-        append(actions[static_cast<std::size_t>(order.action)]);
-        append("\",\"instrument\":");
-        number(order.instrument);
-        append(",\"order_id\":");
-        number(order.order_id);
-        append(",\"side\":");
-        number(order.side);
-        append(",\"price\":");
-        number(order.price);
-        append(",\"remaining\":");
-        number(order.remaining);
-        append(",\"priority\":");
-        number(order.priority);
-        append("}\n");
-    }
-
-    std::string_view view() const noexcept { return {buffer_.data(), size_}; }
-
-private:
-    std::array<char, capacity> buffer_{};
-    std::size_t size_{};
-};
-
 struct WorkerThread {
     std::atomic<int> tid{-1};
     std::atomic<int> cpu{-1};
@@ -157,9 +108,11 @@ struct WorkerThread {
 struct Workers::Impl {
     class Publisher;
     class Blue;
+    class MarketTransport;
 
     explicit Impl(WorkersConfig value)
         : config(std::move(value)), market(config.market_capacity),
+          encoded_market(config.market_capacity),
           lanes(config.notice_handoff_slots), retained(config.notice_capacity) {
         if (market.empty() || lanes.empty() || retained.empty() || !config.notice_batch_size)
             throw std::invalid_argument("all worker capacities must be positive");
@@ -175,6 +128,7 @@ struct Workers::Impl {
 
     WorkersConfig config;
     std::vector<MarketSlot> market;
+    std::vector<market_wire::UpdateFrame> encoded_market;
     std::vector<NoticeLane> lanes;
     std::vector<RetainedNotice> retained;
     std::vector<std::uint64_t> collected;
@@ -186,10 +140,11 @@ struct Workers::Impl {
     std::atomic<bool> market_ready{false};
     std::atomic<bool> market_broken{false};
     std::atomic<bool> notice_copy{true};
-    // The publisher returns credits. The matcher advances production, and
+    // Market transport returns credits after the full frame goes out. The matcher advances production, and
     // BlueZone reads the command count independently of publication.
     alignas(64) std::atomic<std::uint64_t> market_read{};
     alignas(64) std::atomic<std::uint64_t> market_published{};
+    alignas(64) std::atomic<std::uint64_t> market_encoded{};
     alignas(64) std::atomic<std::uint64_t> completed{};
     alignas(64) std::atomic<std::uint64_t> sampled_completed{};
     std::atomic<std::uint64_t> copied_notices{};
@@ -198,25 +153,6 @@ struct Workers::Impl {
 class Workers::Impl::Publisher : public Actor, public Actor::Callback {
 public:
     explicit Publisher(Impl *state) : state_(*state) {
-        listener_.reset(::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0));
-        if (!listener_)
-            socket_error("market socket");
-        const int reuse = 1;
-        if (::setsockopt(listener_.get(), SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0)
-            socket_error("market SO_REUSEADDR");
-        sockaddr_in address{};
-        address.sin_family = AF_INET;
-        address.sin_port = htons(state_.config.market_port);
-        if (::inet_pton(AF_INET, state_.config.bind_address.c_str(), &address.sin_addr) != 1)
-            throw std::invalid_argument("invalid market bind address");
-        if (::bind(listener_.get(), reinterpret_cast<sockaddr *>(&address), sizeof(address)) < 0)
-            socket_error("market bind");
-        if (::listen(listener_.get(), 4) < 0)
-            socket_error("market listen");
-        socklen_t length = sizeof(address);
-        if (::getsockname(listener_.get(), reinterpret_cast<sockaddr *>(&address), &length) < 0)
-            socket_error("market getsockname");
-        state_.port.store(ntohs(address.sin_port), std::memory_order_release);
         state_.publisher_id = getActorId();
         registerEventHandler<MarketEvent>(*this);
         registerCallback(*this);
@@ -242,6 +178,56 @@ public:
             state_.publisher_thread.identify();
             identified_ = true;
         }
+        if (encoded_ != event_tail_) {
+            const auto published = state_.market_published.load(std::memory_order_acquire);
+            const auto limit = std::min(event_tail_, published);
+            const auto count = std::min<std::uint64_t>(limit - encoded_, 32);
+            for (std::uint64_t end = encoded_ + count; encoded_ != end; ++encoded_) {
+                const auto slot = encoded_ % state_.market.size();
+                const auto &record = state_.market[slot];
+                state_.encoded_market[slot] =
+                    market_wire::encode(record.update, record.command_sequence, encoded_ + 1);
+            }
+            if (count)
+                state_.market_encoded.store(encoded_, std::memory_order_release);
+        }
+        registerCallback(*this);
+    }
+
+private:
+    Impl &state_;
+    std::uint64_t encoded_{};
+    std::uint64_t event_tail_{};
+    bool identified_{};
+};
+
+class Workers::Impl::MarketTransport : public Actor, public Actor::Callback {
+public:
+    explicit MarketTransport(Impl *state) : state_(*state) {
+        listener_.reset(::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0));
+        if (!listener_)
+            socket_error("market socket");
+        const int reuse = 1;
+        if (::setsockopt(listener_.get(), SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0)
+            socket_error("market SO_REUSEADDR");
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(state_.config.market_port);
+        if (::inet_pton(AF_INET, state_.config.bind_address.c_str(), &address.sin_addr) != 1)
+            throw std::invalid_argument("invalid market bind address");
+        if (::bind(listener_.get(), reinterpret_cast<sockaddr *>(&address), sizeof(address)) < 0)
+            socket_error("market bind");
+        if (::listen(listener_.get(), 4) < 0)
+            socket_error("market listen");
+        socklen_t length = sizeof(address);
+        if (::getsockname(listener_.get(), reinterpret_cast<sockaddr *>(&address), &length) < 0)
+            socket_error("market getsockname");
+        state_.port.store(ntohs(address.sin_port), std::memory_order_release);
+
+        registerCallback(*this);
+    }
+
+    void onCallback() noexcept {
         if (!state_.market_broken.load(std::memory_order_relaxed)) {
             if (!ready_)
                 subscribe();
@@ -252,9 +238,7 @@ public:
     }
 
 private:
-    static constexpr std::size_t max_send_lines = 32;
-    static constexpr std::string_view ready_message = "{\"type\":\"ready\",\"sequence\":0}\n";
-    static constexpr std::string_view subscribe_message = "{\"type\":\"subscribe\"}";
+    static constexpr std::size_t max_send_frames = 32;
 
     void reset_handshake() noexcept {
         client_.reset();
@@ -289,17 +273,15 @@ private:
                 return;
             }
             input_size_ += static_cast<std::size_t>(got);
-            const std::string_view request(input_.data(), input_size_);
-            const auto end = request.find('\n');
-            if (end == std::string_view::npos && input_size_ < input_.size())
+            if (input_size_ != input_.size())
                 return;
-            if (end == std::string_view::npos || !valid_subscription(request.substr(0, end))) {
+            if (input_ != market_wire::subscribe) {
                 reset_handshake();
                 return;
             }
             subscribed_ = true;
         }
-        if (!send_some(ready_message)) {
+        if (!send_ready()) {
             if (closed_)
                 reset_handshake();
             return;
@@ -308,23 +290,9 @@ private:
         state_.market_ready.store(true, std::memory_order_release);
     }
 
-    static bool valid_subscription(std::string_view request) noexcept {
-        std::size_t index = 0;
-        bool quoted = false;
-        for (const auto ch : request) {
-            if (!quoted && (ch == ' ' || ch == '\t' || ch == '\r'))
-                continue;
-            if (index == subscribe_message.size() || ch != subscribe_message[index++])
-                return false;
-            if (ch == '"')
-                quoted = !quoted;
-        }
-        return index == subscribe_message.size();
-    }
-
-    bool send_some(std::string_view frame) noexcept {
+    bool send_ready() noexcept {
         closed_ = false;
-        frame.remove_prefix(sent_);
+        const auto frame = std::span(market_wire::ready).subspan(sent_);
         const auto count = ::send(client_.get(), frame.data(), frame.size(), MSG_NOSIGNAL);
         if (count > 0) {
             sent_ += static_cast<std::size_t>(count);
@@ -339,31 +307,19 @@ private:
     }
 
     void drain_updates() noexcept {
-        if (batch_head_ == batch_size_) {
-            if (event_head_ == event_tail_)
-                return;
-            const auto published = state_.market_published.load(std::memory_order_acquire);
-            const auto visible = std::min(event_tail_, published);
-            batch_head_ = 0;
-            batch_size_ = std::min<std::uint64_t>(visible - event_head_, lines_.size());
-            for (std::size_t i = 0; i < batch_size_; ++i) {
-                const auto index = event_head_ + i;
-                lines_[i].encode(state_.market[index % state_.market.size()], index + 1);
-            }
-            if (batch_size_ == 0)
-                return;
-        }
-
-        std::array<iovec, max_send_lines> buffers;
-        for (std::size_t i = batch_head_; i < batch_size_; ++i) {
-            auto line = lines_[i].view();
-            if (i == batch_head_)
-                line.remove_prefix(sent_);
-            buffers[i - batch_head_] = {const_cast<char *>(line.data()), line.size()};
+        const auto visible = state_.market_encoded.load(std::memory_order_acquire);
+        if (read_ == visible)
+            return;
+        const auto batch = std::min<std::uint64_t>(visible - read_, max_send_frames);
+        std::array<iovec, max_send_frames> buffers;
+        for (std::size_t i = 0; i < batch; ++i) {
+            auto &frame = state_.encoded_market[(read_ + i) % state_.encoded_market.size()].bytes;
+            const auto offset = i == 0 ? sent_ : 0;
+            buffers[i] = {frame.data() + offset, frame.size() - offset};
         }
         msghdr message{};
         message.msg_iov = buffers.data();
-        message.msg_iovlen = batch_size_ - batch_head_;
+        message.msg_iovlen = batch;
         const auto count = ::sendmsg(client_.get(), &message, MSG_NOSIGNAL);
         if (count <= 0) {
             const bool closed = count == 0 || !would_retry();
@@ -378,33 +334,33 @@ private:
         }
 
         blocked_since_.reset();
-        auto sent = static_cast<std::size_t>(count) + sent_;
-        const auto initial_head = batch_head_;
-        while (batch_head_ < batch_size_ && sent >= lines_[batch_head_].view().size()) {
-            sent -= lines_[batch_head_].view().size();
-            ++batch_head_;
-        }
-        sent_ = sent;
-        if (batch_head_ != initial_head) {
-            event_head_ += batch_head_ - initial_head;
-            state_.market_read.store(event_head_, std::memory_order_release);
+        const auto bytes = static_cast<std::size_t>(count) + sent_;
+        constexpr auto frame_size = market_wire::UpdateFrame{}.bytes.size();
+        const auto completed = bytes / frame_size;
+        sent_ = bytes % frame_size;
+        if (completed) {
+            read_ += completed;
+            state_.market_read.store(read_, std::memory_order_release);
+            try {
+                if (state_.config.diagnostic)
+                    state_.log("market_frames_sent", "{\"sequence\":" + std::to_string(read_) +
+                               ",\"thread_id\":" + std::to_string(::gettid()) +
+                               ",\"cpu\":" + std::to_string(::sched_getcpu()) + "}");
+            } catch (...) {
+                // Test diagnostics do not affect delivery or credit return.
+            }
         }
     }
 
     Impl &state_;
     Socket listener_;
     Socket client_;
-    std::array<char, 128> input_{};
+    std::array<std::byte, market_wire::subscribe.size()> input_{};
     std::size_t input_size_{};
     std::size_t sent_{};
-    std::uint64_t event_head_{};
-    std::uint64_t event_tail_{};
+    std::uint64_t read_{};
     Clock::time_point handshake_started_{};
     std::optional<Clock::time_point> blocked_since_;
-    std::array<MarketLine, max_send_lines> lines_;
-    std::size_t batch_head_{};
-    std::size_t batch_size_{};
-    bool identified_{};
     bool ready_{};
     bool subscribed_{};
     bool closed_{};
@@ -481,6 +437,7 @@ void Workers::add_actors(tredzone::Engine::StartSequence &sequence,
                          Actor::CoreId publisher_cpu, Actor::CoreId blue_cpu) {
     sequence.addActor<Impl::Publisher>(publisher_cpu, impl_.get());
     sequence.addActor<Impl::Blue>(blue_cpu, impl_.get());
+    sequence.addActor<Impl::MarketTransport>(blue_cpu, impl_.get());
 }
 
 std::uint16_t Workers::market_port() const noexcept {

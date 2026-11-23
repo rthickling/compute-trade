@@ -491,6 +491,9 @@ def case_worker_placement_and_event_handoff(exchange):
     assert message["sequence"] == 1
     assert message["command_sequence"] == command["command_sequence"]
     assert message["order_id"] == ack.fields["order_id"]
+    sent = exchange.wait_for("market_frames_sent", sequence=1)
+    assert sent["thread_id"] == blue["thread_id"]
+    assert sent["cpu"] == blue["cpu"]
 
 
 CASES = {

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="compute_trade_market" id="2" version="1"
+                   byteOrder="littleEndian">
+    <types>
+        <composite name="messageHeader">
+            <type name="blockLength" primitiveType="uint16"/>
+            <type name="templateId" primitiveType="uint16"/>
+            <type name="schemaId" primitiveType="uint16"/>
+            <type name="version" primitiveType="uint16"/>
+        </composite>
+        <enum name="Action" encodingType="uint8">
+            <validValue name="Add">0</validValue>
+            <validValue name="Modify">1</validValue>
+            <validValue name="Remove">2</validValue>
+        </enum>
+    </types>
+    <sbe:message name="Subscribe" id="1"/>
+    <sbe:message name="Ready" id="2">
+        <field name="sequence" id="1" type="uint64"/>
+    </sbe:message>
+    <sbe:message name="BookUpdate" id="3">
+        <field name="sequence" id="1" type="uint64"/>
+        <field name="commandSequence" id="2" type="uint64"/>
+        <field name="action" id="3" type="Action"/>
+        <field name="instrument" id="4" type="uint32"/>
+        <field name="orderId" id="5" type="uint64"/>
+        <field name="side" id="6" type="uint8"/>
+        <field name="price" id="7" type="int64"/>
+        <field name="remaining" id="8" type="uint64"/>
+        <field name="priority" id="9" type="uint64"/>
+    </sbe:message>
+</sbe:messageSchema>
