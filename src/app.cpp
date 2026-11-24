@@ -62,6 +62,19 @@ public:
       throw std::logic_error("exchange ring overflow");
     at(count_++) = value;
   }
+  template <typename Write>
+  const T &push_overwriting(Write write) {
+    if (storage_.empty())
+      throw std::logic_error("exchange ring has no storage");
+    // When full, the tail wraps to the oldest entry.
+    auto &slot = at(count_);
+    write(slot);
+    if (count_ == storage_.size())
+      head_ = wrap(head_ + 1);
+    else
+      ++count_;
+    return slot;
+  }
   void pop() {
     head_ = wrap(head_ + 1);
     --count_;
@@ -225,7 +238,6 @@ class Gateway : public Actor, public Actor::Callback {
   bool process_commands_{true};
   std::optional<std::size_t> publication_cap_;
   std::vector<std::size_t> reply_demand_;
-  Reply private_reply_;
 
   std::vector<NoticeSlot> notices_;
   std::vector<std::size_t> free_notices_;
@@ -542,13 +554,13 @@ class Gateway : public Actor, public Actor::Callback {
     if (connection && connection->recovering)
       throw std::logic_error("live private reply attempted during replay");
     message.sequence = private_sequence(identity);
-    optiq::encode_into(message, private_reply_.frame);
-    private_reply_.sequence = message.sequence;
-    if (!identity.replay.available())
-      identity.replay.pop();
-    identity.replay.push(private_reply_);
+    const auto &stored = identity.replay.push_overwriting([&message](Reply &reply) {
+      optiq::encode_into(message, reply.frame);
+      reply.sequence = message.sequence;
+      reply.end_connection = false;
+    });
     if (connection)
-      append(*connection, private_reply_);
+      append(*connection, stored);
     if (state_->diag.enabled()) {
       event("private_reply_ready", with_session(index)
                 .set("client_order_id", message.client_order_id)

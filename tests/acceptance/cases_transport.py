@@ -98,6 +98,7 @@ def case_logon_required(exchange):
 
 
 def case_partial_output_retry(exchange):
+    """Pending TCP bytes survive reuse of their ordinary replay slot."""
     exchange.subscribe()
     client = exchange.connect()
     exchange.control("gate", name="private_send_bytes", value=5, **SESSION)
@@ -552,7 +553,7 @@ CASES = {
     "invalid_framing_is_connection_local": (case_invalid_framing_is_connection_local, {}),
     "malformed_suffix_follows_complete_frame": (case_malformed_suffix_follows_complete_frame, {}),
     "logon_required": (case_logon_required, {}),
-    "partial_output_retry": (case_partial_output_retry, {}),
+    "partial_output_retry": (case_partial_output_retry, {"ordinary_replay_capacity": 1}),
     "partial_ack_disconnect_replays_full_frame": (
         case_partial_ack_disconnect_replays_full_frame, {"reply_slots_per_session": 1},
     ),
