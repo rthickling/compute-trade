@@ -188,7 +188,7 @@ class TcpWorker : public Actor, public Actor::Callback {
       connection.pending_since = now;
     const auto session = slot.session.load(std::memory_order_acquire);
     if (reply->frame.size == 0 && connection.session_frame.size == 0) {
-      connection.session_frame = optiq::encode(slot.session_message);
+      optiq::encode_into(slot.session_message, connection.session_frame);
       if (diag_.enabled() && session != SIZE_MAX) {
         const auto type = slot.session_message.type;
         const auto event = type == optiq::Template::LogonAck ? "logon_ack_encoded" : "replay_frame_encoded";

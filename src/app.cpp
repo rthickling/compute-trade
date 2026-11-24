@@ -225,6 +225,7 @@ class Gateway : public Actor, public Actor::Callback {
   bool process_commands_{true};
   std::optional<std::size_t> publication_cap_;
   std::vector<std::size_t> reply_demand_;
+  Reply private_reply_;
 
   std::vector<NoticeSlot> notices_;
   std::vector<std::size_t> free_notices_;
@@ -541,12 +542,13 @@ class Gateway : public Actor, public Actor::Callback {
     if (connection && connection->recovering)
       throw std::logic_error("live private reply attempted during replay");
     message.sequence = private_sequence(identity);
-    Reply stored{optiq::encode(message), message.sequence};
+    optiq::encode_into(message, private_reply_.frame);
+    private_reply_.sequence = message.sequence;
     if (!identity.replay.available())
       identity.replay.pop();
-    identity.replay.push(stored);
+    identity.replay.push(private_reply_);
     if (connection)
-      append(*connection, stored);
+      append(*connection, private_reply_);
     if (state_->diag.enabled()) {
       event("private_reply_ready", with_session(index)
                 .set("client_order_id", message.client_order_id)

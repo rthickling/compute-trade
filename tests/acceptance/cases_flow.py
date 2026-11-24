@@ -528,7 +528,12 @@ def ordinary_reply_gap(exchange):
 
 CASES = {
     "publication_overtake": (publication_overtake, {}),
-    "disconnect_command_order": (disconnect_command_order, {}),
+    # The two removals follow five updates and wrap within one batch.
+    "disconnect_command_order": (disconnect_command_order, {
+        "publication_capacity": 6,
+        "live_orders_per_session": 6,
+        "matching_max_fills": 4,
+    }),
     "notice_capacity": (
         notice_capacity,
         {

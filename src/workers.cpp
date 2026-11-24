@@ -201,14 +201,18 @@ public:
         const auto published = state_.market_published.load(std::memory_order_acquire);
         const auto limit = std::min(event_tail_, published);
         const auto count = std::min<std::uint64_t>(limit - encoded_, 32);
-        for (std::uint64_t end = encoded_ + count; encoded_ != end; ++encoded_) {
-            const auto slot = encoded_ % state_.market.size();
-            const auto &record = state_.market[slot];
-            market_wire::encode(state_.encoded_market[slot], record.update,
-                                record.command_sequence, encoded_ + 1);
-        }
-        if (count)
+        if (count) {
+            const auto capacity = state_.market.size();
+            auto slot = encoded_ % capacity;
+            for (std::uint64_t end = encoded_ + count; encoded_ != end; ++encoded_) {
+                const auto &record = state_.market[slot];
+                market_wire::encode(state_.encoded_market[slot], record.update,
+                                    record.command_sequence, encoded_ + 1);
+                if (++slot == capacity)
+                    slot = 0;
+            }
             state_.market_encoded.store(encoded_, std::memory_order_release);
+        }
         // Continue only while a received Event has work left. A batch may
         // span several callbacks or still be awaiting the matcher's frontier.
         if (encoded_ != event_tail_)
@@ -499,9 +503,13 @@ void Workers::publish(Actor &sender, std::span<const BookChange> changes,
     const auto room = impl_->market.size() - static_cast<std::size_t>(first - consumed);
     if (changes.size() > room)
         throw std::logic_error("market publication was not reserved");
-    for (std::size_t index = 0; index < changes.size(); ++index)
-        impl_->market[(first + index) % impl_->market.size()] =
-            {market_update(changes[index]), command_sequence};
+    const auto capacity = impl_->market.size();
+    auto slot = first % capacity;
+    for (const auto &change : changes) {
+        impl_->market[slot] = {market_update(change), command_sequence};
+        if (++slot == capacity)
+            slot = 0;
+    }
     const auto diagnostic = static_cast<bool>(impl_->config.diagnostic);
     Actor::Event::Pipe(sender, impl_->publisher_id).push<MarketEvent>(
         first, changes.size(), command_sequence, diagnostic ? ::gettid() : -1,

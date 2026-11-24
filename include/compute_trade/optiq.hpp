@@ -252,12 +252,13 @@ inline std::size_t frame_length(std::span<const std::byte> bytes) {
   return length;
 }
 
-inline Frame encode(const Message &message) {
+// Writes the complete wire prefix. A reused buffer may contain any bytes
+// beyond the encoded frame.
+inline void encode_into(const Message &message, Frame &frame) {
   using namespace detail;
   const auto description = layout(message.type);
-  Frame frame;
   frame.size = header_size + description.size + 2 * description.groups.size();
-  const auto bytes = std::span(frame.bytes);
+  const auto bytes = std::span(frame.bytes).first(frame.size);
   store(bytes, 0, static_cast<std::uint16_t>(frame.size));
   store(bytes, 2, description.size);
   store(bytes, 4, static_cast<std::uint16_t>(message.type));
@@ -266,7 +267,7 @@ inline Frame encode(const Message &message) {
   auto body = bytes.subspan(header_size, description.size);
   auto group_offset = header_size + description.size;
   for (const auto group : description.groups) {
-    store(bytes, group_offset, group);
+    store<std::uint16_t>(bytes, group_offset, group); // Block length and zero count.
     group_offset += 2;
   }
 
@@ -284,6 +285,7 @@ inline Frame encode(const Message &message) {
     store(body, 58, null_byte);
     store(body, 59, message.execution_instruction);
     store(body, 60, message.dark_execution_instruction);
+    store(body, 61, std::uint8_t{0});
     store(body, 62, null_short);
     store(body, 64, null_short);
     store(body, 66, null_client_order_id);
@@ -308,6 +310,7 @@ inline Frame encode(const Message &message) {
       store(body, 77, null_byte);
       store(body, 78, message.execution_instruction);
       store(body, 79, message.dark_execution_instruction);
+      store(body, 80, std::uint8_t{0});
       store(body, 81, null_short);
     }
     break;
@@ -345,6 +348,8 @@ inline Frame encode(const Message &message) {
     store(body, 96, std::uint8_t{1});
     store(body, 97, null_sequence);
     store(body, 101, null_byte);
+    store(body, 102, std::uint64_t{0});
+    store(body, 110, std::uint64_t{0});
     break;
   case Template::Kill:
     private_reply(body, message);
@@ -369,6 +374,7 @@ inline Frame encode(const Message &message) {
     store(body, 0, message.logical_access_id);
     store(body, 4, message.partition_id);
     store(body, 6, message.last_sequence);
+    store(body, 10, std::uint64_t{0});
     store(body, 18, message.queueing_indicator);
     break;
   case Template::LogonAck:
@@ -390,6 +396,11 @@ inline Frame encode(const Message &message) {
     store(body, 4, message.last_sequence);
     break;
   }
+}
+
+inline Frame encode(const Message &message) {
+  Frame frame;
+  encode_into(message, frame);
   return frame;
 }
 
