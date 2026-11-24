@@ -197,7 +197,8 @@ inline Cores choose_cores(const AppOptions &options) {
       return sibling != cpu && online.contains(sibling);
     });
   };
-  std::set<std::pair<int, int>> assigned;
+  std::set<std::pair<int, int>> assigned_physical;
+  std::set<unsigned> assigned_cpu;
   const auto next = [&](int requested, bool reserved) {
     if (requested >= 0) {
       const auto cpu = static_cast<unsigned>(requested);
@@ -209,17 +210,28 @@ inline Cores choose_cores(const AppOptions &options) {
                                       " must be online and isolated with no online SMT sibling");
         throw std::invalid_argument("RedZone run invalid: BlueZone requires an allowed housekeeping CPU");
       }
-      if (!assigned.insert(physical_core(requested)).second)
+      if (!assigned_physical.insert(physical_core(requested)).second)
         throw std::invalid_argument("gateway, publisher and BlueZone require distinct physical cores");
+      assigned_cpu.insert(cpu);
       return cpu;
     }
     for (unsigned cpu = 0; cpu <= UINT8_MAX; ++cpu) {
-      if (usable(cpu, reserved) && assigned.insert(physical_core(static_cast<int>(cpu))).second)
+      if (usable(cpu, reserved) &&
+          assigned_physical.insert(physical_core(static_cast<int>(cpu))).second) {
+        assigned_cpu.insert(cpu);
         return cpu;
+      }
     }
-    if (options.redzone)
-      throw std::invalid_argument("RedZone requires two isolated physical cores and one allowed housekeeping core");
-    throw std::invalid_argument("at least three distinct physical cores are required");
+    // Ordinary runs still place the three workers on different logical CPUs
+    // when the machine has fewer than three physical cores. RedZone does not.
+    if (!options.redzone) {
+      for (unsigned cpu = 0; cpu <= UINT8_MAX; ++cpu) {
+        if (usable(cpu, reserved) && assigned_cpu.insert(cpu).second)
+          return cpu;
+      }
+      throw std::invalid_argument("at least three distinct CPUs are required");
+    }
+    throw std::invalid_argument("RedZone requires two isolated physical cores and one allowed housekeeping core");
   };
   // Reserve explicit placements first so automatic placement cannot occupy them.
   Cores result{};

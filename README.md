@@ -29,7 +29,7 @@ cmake --build --preset acceptance --parallel
 ctest --test-dir build/acceptance --output-on-failure
 ```
 
-The application needs three allowed physical cores. The tests launch
+The application needs three allowed CPUs. It uses distinct physical cores when they exist, and distinct logical CPUs otherwise. The tests launch
 ordinary pinned workers and ephemeral loopback sockets. Allow a few seconds
 for the test run after the build. The `debug` and `release` presets run matcher,
 Simplx, and Optiq startup checks along with framework self-tests. The
